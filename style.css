@@ -1,0 +1,186 @@
+.mem-summarizer-panel {
+    margin-top: 6px;
+}
+
+.mem-summarizer-panel .mem-row {
+    margin: 8px 0;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.mem-summarizer-panel .mem-inline {
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 10px;
+}
+
+.mem-summarizer-panel textarea {
+    width: 100%;
+    resize: vertical;
+    font-size: 0.9em;
+    box-sizing: border-box;
+}
+
+.mem-summarizer-panel select,
+.mem-summarizer-panel input[type="number"],
+.mem-summarizer-panel input[type="text"] {
+    background: var(--SmartThemeBlurTintColor, #222);
+    color: inherit;
+    border: 1px solid var(--SmartThemeBorderColor, #555);
+    border-radius: 4px;
+    padding: 4px 6px;
+    min-height: 30px;
+    box-sizing: border-box;
+}
+
+.mem-summarizer-panel .menu_button {
+    min-height: 34px;
+    padding: 4px 12px;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    white-space: nowrap;
+}
+
+/* 主按钮：立即总结 —— 视觉上突出，方便手机上一眼找到 */
+.mem-summarizer-panel .mem-btn-primary {
+    background: var(--SmartThemeQuoteColor, #4a90d9);
+    border-color: transparent;
+    color: #fff;
+    font-weight: 600;
+    justify-content: center;
+    width: 100%;
+}
+.mem-summarizer-panel .mem-btn-primary:hover:not(:disabled) {
+    filter: brightness(1.1);
+}
+.mem-summarizer-panel .mem-btn-primary:disabled {
+    opacity: 0.65;
+    cursor: not-allowed;
+}
+
+/* 危险操作按钮：清空/删除 */
+.mem-summarizer-panel .menu_button.danger {
+    color: #e05a5a;
+    border-color: rgba(224, 90, 90, 0.4);
+}
+.mem-summarizer-panel .menu_button.danger:hover {
+    background: rgba(224, 90, 90, 0.15);
+}
+
+/* 图标按钮（世界书刷新等），更紧凑、方形 */
+.mem-summarizer-panel .mem-btn-icon {
+    padding: 4px 10px;
+    min-width: 34px;
+    justify-content: center;
+}
+
+.mem-summarizer-panel .mem-hint {
+    font-size: 0.8em;
+    opacity: 0.65;
+    line-height: 1.5;
+    margin-top: -2px;
+}
+
+.mem-status-line {
+    display: flex;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 4px 12px;
+    font-size: 0.85em;
+    opacity: 0.9;
+}
+
+.mem-status-sub {
+    opacity: 0.65;
+    font-size: 0.8em;
+}
+
+.mem-progress {
+    width: 100%;
+    height: 6px;
+    border-radius: 3px;
+    background: rgba(128, 128, 128, 0.2);
+    overflow: hidden;
+    margin: 5px 0;
+}
+
+.mem-progress-bar {
+    height: 100%;
+    background: var(--SmartThemeQuoteColor, #4a90d9);
+    transition: width 0.3s ease;
+}
+
+.mem-summary-list {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    margin-top: 10px;
+}
+
+.mem-empty-hint {
+    text-align: center;
+    padding: 20px 10px;
+    opacity: 0.6;
+    font-size: 0.9em;
+    border: 1px dashed var(--SmartThemeBorderColor, #555);
+    border-radius: 8px;
+}
+
+.mem-summary-item {
+    border: 1px solid var(--SmartThemeBorderColor, #555);
+    border-radius: 8px;
+    padding: 10px;
+    background: rgba(255, 255, 255, 0.03);
+}
+
+.mem-summary-meta {
+    font-size: 0.8em;
+    opacity: 0.75;
+    margin-bottom: 6px;
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 4px;
+}
+
+.mem-badge {
+    display: inline-block;
+    font-size: 0.85em;
+    padding: 1px 7px;
+    border-radius: 10px;
+    font-weight: 600;
+    line-height: 1.6;
+}
+.mem-badge-auto {
+    background: rgba(74, 144, 217, 0.18);
+    color: #4a90d9;
+}
+.mem-badge-manual {
+    background: rgba(140, 140, 140, 0.2);
+    color: #999;
+}
+
+.mem-summary-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 8px;
+    align-items: center;
+}
+
+.mem-wi-keys {
+    flex: 1;
+    min-width: 140px;
+}
+
+@media (max-width: 420px) {
+    .mem-summarizer-panel .mem-inline {
+        gap: 8px 14px;
+    }
+    .mem-summary-actions .mem-wi-keys {
+        flex-basis: 100%;
+    }
+}
