@@ -288,3 +288,57 @@
         margin-left: 0;
     }
 }
+
+/* ==================== 核心记忆 & 分页 新增样式 ==================== */
+
+.mem-section-title {
+    font-weight: 600;
+    font-size: 0.95em;
+    margin: 6px 0 4px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.mem-badge-core {
+    background: rgba(220, 160, 50, 0.22);
+    color: #d4a030;
+}
+
+.mem-core-item {
+    border-color: rgba(220, 160, 50, 0.35);
+}
+
+.mem-btn-core {
+    background: rgba(220, 160, 50, 0.15);
+    border-color: rgba(220, 160, 50, 0.4);
+    color: #d4a030;
+    font-weight: 600;
+}
+.mem-btn-core:hover:not(:disabled) {
+    background: rgba(220, 160, 50, 0.25);
+}
+.mem-btn-core:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
+.mem-select-for-core {
+    width: 16px;
+    height: 16px;
+    cursor: pointer;
+    flex-shrink: 0;
+}
+
+#mem-summary-pagination {
+    margin-top: 8px;
+    margin-bottom: 4px;
+}
+
+#mem-summary-pagination .menu_button {
+    font-size: 0.85em;
+    opacity: 0.8;
+}
+#mem-summary-pagination .menu_button:hover {
+    opacity: 1;
+}

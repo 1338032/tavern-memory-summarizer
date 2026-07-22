@@ -74,6 +74,10 @@ const MODULE_NAME = "tavern-memory-summarizer";
 // 运行时状态：是否有一次总结正在进行中（防止并发重复触发）
 let isSummarizing = false;
 
+// 运行时状态：手动总结提醒计数（关闭自动总结时，提醒用户该总结了）
+// 每次实际完成一次总结（手动）或切换聊天时重置为 0
+let manualReminderCount = 0;
+
 // ------------------------ 默认配置 ------------------------
 const defaultSettings = {
     messagesPerSummary: 20,          // 每次总结发送的对话条数
@@ -93,6 +97,13 @@ const defaultSettings = {
     wiPosition: "",                   // 写入世界书时使用的插入位置键名（从当前酒馆版本动态探测）
     wiDepth: 4,                       // 位置为"指定深度"时使用
     wiRole: "system",                 // 位置为"指定深度"时使用：system / user / assistant
+    corePromptTemplate:
+        "请从以下多段剧情摘要中提取核心记忆信息（如：角色生日、重要约定、" +
+        "作息习惯、兴趣爱好、重要事件、关键物品、人物关系确认等永久性事实），" +
+        "以简洁的条目列表形式输出，每条一行，只输出核心事实，" +
+        "不要输出剧情经过或口水内容：\n\n{{content}}",
+    coreInjectCount: 5,               // 注入时合并最近几条核心记忆
+    summaryPageSize: 20,              // 长期记忆列表每页/默认显示条数
 };
 
 // 每个"聊天"独立保存的数据（摘要内容 + 计数指针），存在 chat_metadata 里，
@@ -104,6 +115,7 @@ function getChatData() {
         context.chatMetadata[MODULE_NAME] = {
             lastSummarizedIndex: 0,
             summaries: [], // { id, time, range: [start,end], content, auto }
+            coreMemories: [], // { id, time, content, sourceIds: [] }
         };
     }
     return context.chatMetadata[MODULE_NAME];
@@ -430,6 +442,9 @@ async function runSummarization(manual = false) {
         data.lastSummarizedIndex = endIdx;
         saveChatData();
 
+        // 总结完成后重置手动提醒计数，下一轮积累达到条数时会重新提醒
+        manualReminderCount = 0;
+
         toastSuccess(`${manual ? "手动" : "自动"}总结完成（消息 ${startIdx + 1}-${endIdx}）`);
     } catch (e) {
         console.error("[记忆总结助手] 生成总结失败：", e);
@@ -456,17 +471,28 @@ function updateInjection() {
         return;
     }
 
-    const recent = data.summaries.slice(-settings.injectCount);
-    if (recent.length === 0) {
-        // 摘要被删空之后，如果不在这里也清空之前注入的内容，
-        // 之前注入的旧文本会一直挂在 prompt 组装里，即使摘要已经不存在了——
-        // 这正是"自动注入有上下文污染风险"里要检查的情况之一。
+    const recentCore = (data.coreMemories || []).slice(-settings.coreInjectCount);
+    const recentSummary = data.summaries.slice(-settings.injectCount);
+
+    if (recentCore.length === 0 && recentSummary.length === 0) {
         context.setExtensionPrompt(MODULE_NAME, "", extension_prompt_types.IN_PROMPT, 0);
         return;
     }
 
-    const combined =
-        "【剧情记忆摘要】\n" + recent.map((s) => `- ${s.content}`).join("\n");
+    const parts = [];
+    if (recentCore.length > 0) {
+        parts.push(
+            "【核心记忆（绝对优先，不可违反、不可遗忘）】\n" +
+            recentCore.map((c) => `- ${c.content}`).join("\n")
+        );
+    }
+    if (recentSummary.length > 0) {
+        parts.push(
+            "【剧情记忆摘要】\n" +
+            recentSummary.map((s) => `- ${s.content}`).join("\n")
+        );
+    }
+    const combined = parts.join("\n\n");
 
     const positionMap = {
         IN_PROMPT: extension_prompt_types.IN_PROMPT,
@@ -486,6 +512,128 @@ function updateInjection() {
         false,
         roleMap[settings.injectRole] ?? extension_prompt_roles.SYSTEM
     );
+}
+
+// ------------------------ 核心记忆总结 ------------------------
+
+async function runCoreSummarization(selectedIds) {
+    const context = getContext();
+    const settings = getSettings();
+    const data = getChatData();
+
+    if (isSummarizing) {
+        toastInfo("已有一次总结正在进行中，请稍候…");
+        return;
+    }
+    if (!selectedIds || selectedIds.length === 0) {
+        toastInfo("请先勾选要提取核心记忆的长期记忆条目");
+        return;
+    }
+
+    const selectedEntries = data.summaries.filter((s) => selectedIds.includes(s.id));
+    if (selectedEntries.length === 0) {
+        toastInfo("所选条目已不存在");
+        return;
+    }
+
+    const combinedContent = selectedEntries.map((s) => s.content).join("\n\n");
+    if (!combinedContent.trim()) {
+        toastInfo("所选条目内容为空");
+        return;
+    }
+
+    isSummarizing = true;
+    const coreSumBtn = document.getElementById("mem-core-summarize-btn");
+    if (coreSumBtn) {
+        coreSumBtn.disabled = true;
+        coreSumBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> 提取中…';
+    }
+
+    const chatIdSnapshot = context.chatId;
+    context.setExtensionPrompt(MODULE_NAME, "", extension_prompt_types.IN_PROMPT, 0);
+
+    try {
+        if (typeof context.generateQuietPrompt !== "function") {
+            throw new Error("当前酒馆版本未找到 generateQuietPrompt 接口");
+        }
+
+        const prompt = settings.corePromptTemplate.replace("{{content}}", combinedContent);
+        const result = await context.generateQuietPrompt(prompt, false, false);
+
+        const freshContext = getContext();
+        if (freshContext.chatId !== chatIdSnapshot) {
+            toastInfo("聊天已被切换，核心记忆提取结果已放弃");
+            return;
+        }
+
+        const trimmed = String(result || "").trim();
+        if (!trimmed) {
+            throw new Error("AI 返回了空内容");
+        }
+
+        // 生成核心记忆条目
+        const coreEntry = {
+            id: `core-${Date.now()}`,
+            time: new Date().toLocaleString(),
+            content: trimmed,
+            sourceIds: selectedIds.slice(),
+        };
+        if (!data.coreMemories) data.coreMemories = [];
+        data.coreMemories.push(coreEntry);
+
+        // 弹窗询问：已提取核心的长期记忆是保留还是删除
+        const keepConfirmed = await showModal({
+            title: "核心记忆提取完成",
+            bodyHtml: `
+                <div class="mem-modal-line">已从 ${selectedEntries.length} 条长期记忆中提取出核心记忆。</div>
+                <div class="mem-modal-line" style="margin-top:8px"><b>核心记忆内容预览：</b></div>
+                <textarea class="mem-preview-textarea" readonly>${escapeHtml(trimmed)}</textarea>
+                <div class="mem-modal-line" style="margin-top:10px">对这 ${selectedEntries.length} 条原始长期记忆，你想怎么处理？</div>
+                <div class="mem-modal-line">• <b>保留</b>：把它们合并为一条，放在最旧的记忆后面</div>
+                <div class="mem-modal-line">• <b>删除</b>：直接移除这些长期记忆（总结进度不受影响）</div>
+            `,
+            confirmText: "保留（合并）",
+            cancelText: "删除",
+            showCancel: true,
+            danger: false,
+        });
+
+        if (keepConfirmed) {
+            // 保留：合并为一条，放在最旧记忆后面（即 summaries 数组最前面）
+            const mergedContent = selectedEntries.map((s) => s.content).join("\n");
+            const mergedEntry = {
+                id: `merged-${Date.now()}`,
+                time: new Date().toLocaleString(),
+                range: [
+                    Math.min(...selectedEntries.map((s) => s.range?.[0] ?? 0)),
+                    Math.max(...selectedEntries.map((s) => s.range?.[1] ?? 0)),
+                ],
+                content: mergedContent,
+                auto: false,
+            };
+            // 移除原始条目
+            data.summaries = data.summaries.filter((s) => !selectedIds.includes(s.id));
+            // 插入到数组最前面（最旧的位置）
+            data.summaries.unshift(mergedEntry);
+        } else {
+            // 删除：直接移除原始条目，lastSummarizedIndex 不变
+            data.summaries = data.summaries.filter((s) => !selectedIds.includes(s.id));
+        }
+
+        saveChatData();
+        toastSuccess("核心记忆提取完成");
+    } catch (e) {
+        console.error("[记忆总结助手] 核心记忆提取失败：", e);
+        toastError(`核心记忆提取失败：${extractErrorReason(e)}`, { timeOut: 8000 });
+    } finally {
+        isSummarizing = false;
+        if (coreSumBtn) {
+            coreSumBtn.disabled = false;
+            coreSumBtn.innerHTML = '<i class="fa-solid fa-gem"></i> 从选中的长期记忆提取核心';
+        }
+        updateInjection();
+        renderPanel();
+    }
 }
 
 // ------------------------ 写入世界书 ------------------------
@@ -651,6 +799,8 @@ async function openWiWritePreview(entry, triggerBtn) {
 async function onChatEvent() {
     const settings = getSettings();
     if (!settings.autoSummarize) {
+        // 手动总结玩家提醒逻辑：自动总结关闭时，按待总结消息数提醒
+        checkManualReminder();
         renderPanel();
         return;
     }
@@ -661,6 +811,33 @@ async function onChatEvent() {
         console.error("[记忆总结助手] 自动总结流程异常：", e);
     }
     renderPanel();
+}
+
+function checkManualReminder() {
+    const settings = getSettings();
+    const context = getContext();
+    const data = getChatData();
+    const total = (context.chat || []).length;
+    const pending = total - data.lastSummarizedIndex;
+    const threshold = settings.messagesPerSummary;
+
+    // 只在两个节点提醒：刚好达到设定条数时（第 1 次）、超出 5 条时（第 2 次）
+    // 之后不再提醒，直到用户完成一次总结后 manualReminderCount 被重置
+    if (manualReminderCount >= 2) return;
+
+    if (manualReminderCount === 0 && pending >= threshold) {
+        manualReminderCount = 1;
+        toastInfo(
+            `已积累 ${pending} 条待总结消息（设定每 ${threshold} 条总结一次），建议点击"立即总结一次"整理记忆`,
+            { timeOut: 8000, extendedTimeOut: 3000 }
+        );
+    } else if (manualReminderCount === 1 && pending >= threshold + 5) {
+        manualReminderCount = 2;
+        toastInfo(
+            `待总结消息已达 ${pending} 条，超出设定条数较多，建议尽快手动总结，避免遗忘过多细节`,
+            { timeOut: 8000, extendedTimeOut: 3000 }
+        );
+    }
 }
 
 // 消息被删除时，把总结进度指针夹回合法范围，避免出现负数待总结数导致的卡死状态。
@@ -693,6 +870,7 @@ function exportData() {
             chatData: {
                 lastSummarizedIndex: data.lastSummarizedIndex,
                 summaries: data.summaries,
+                coreMemories: data.coreMemories || [],
             },
             settings: structuredClone(settings),
         };
@@ -734,10 +912,12 @@ async function importDataFromFile(file) {
         const rawSummaries = Array.isArray(parsed?.chatData?.summaries) ? parsed.chatData.summaries : [];
         const validSummaries = rawSummaries.filter((x) => x && typeof x.content === "string" && x.content.trim());
         const skipped = rawSummaries.length - validSummaries.length;
+        const rawCores = Array.isArray(parsed?.chatData?.coreMemories) ? parsed.chatData.coreMemories : [];
+        const validCores = rawCores.filter((x) => x && typeof x.content === "string" && x.content.trim());
         const hasSettings = !!(parsed.settings && typeof parsed.settings === "object");
 
-        if (validSummaries.length === 0 && !hasSettings) {
-            toastError("导入失败：文件中没有可识别的摘要或设置数据");
+        if (validSummaries.length === 0 && validCores.length === 0 && !hasSettings) {
+            toastError("导入失败：文件中没有可识别的摘要、核心记忆或设置数据");
             return;
         }
 
@@ -745,10 +925,15 @@ async function importDataFromFile(file) {
             <div class="mem-modal-line">来源聊天：${escapeHtml(String(parsed.chatId ?? "未知"))}</div>
             <div class="mem-modal-line">导出时间：${escapeHtml(String(parsed.exportedAt ?? "未知"))}</div>
             <div class="mem-modal-line">检测到 <b>${validSummaries.length}</b> 条有效摘要${skipped ? `（另有 ${skipped} 条格式异常，会被跳过）` : ""}</div>
+            <div class="mem-modal-line">检测到 <b>${validCores.length}</b> 条核心记忆</div>
             <div class="mem-modal-line">${hasSettings ? "检测到插件设置数据" : "未检测到插件设置数据"}</div>
             <label class="mem-modal-check">
                 <input type="checkbox" id="mem-import-chk-summaries" ${validSummaries.length ? "checked" : "disabled"}/>
                 导入摘要（追加到当前聊天已有摘要之后，不会覆盖/删除现有摘要）
+            </label>
+            <label class="mem-modal-check">
+                <input type="checkbox" id="mem-import-chk-cores" ${validCores.length ? "checked" : "disabled"}/>
+                导入核心记忆（追加到当前聊天已有核心记忆之后）
             </label>
             <label class="mem-modal-check">
                 <input type="checkbox" id="mem-import-chk-settings" ${hasSettings ? "checked" : "disabled"}/>
@@ -763,10 +948,33 @@ async function importDataFromFile(file) {
             cancelText: "取消",
             onConfirm: (bodyEl) => ({
                 importSummaries: !!bodyEl.querySelector("#mem-import-chk-summaries")?.checked,
+                importCores: !!bodyEl.querySelector("#mem-import-chk-cores")?.checked,
                 importSettings: !!bodyEl.querySelector("#mem-import-chk-settings")?.checked,
             }),
         });
         if (!result) return; // 用户取消
+
+        let importedCoreCount = 0;
+        if (result.importCores && validCores.length > 0) {
+            const data = getChatData();
+            if (!data.coreMemories) data.coreMemories = [];
+            const existingIds = new Set(data.coreMemories.map((x) => x.id));
+            for (const raw of validCores) {
+                let id = typeof raw.id === "string" && raw.id ? raw.id : `core-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+                while (existingIds.has(id)) {
+                    id = `${id}-${Math.random().toString(36).slice(2, 6)}`;
+                }
+                existingIds.add(id);
+                data.coreMemories.push({
+                    id,
+                    time: typeof raw.time === "string" && raw.time ? raw.time : new Date().toLocaleString(),
+                    content: String(raw.content),
+                    sourceIds: Array.isArray(raw.sourceIds) ? raw.sourceIds : [],
+                });
+                importedCoreCount++;
+            }
+            saveChatData();
+        }
 
         let importedCount = 0;
         if (result.importSummaries && validSummaries.length > 0) {
@@ -809,7 +1017,7 @@ async function importDataFromFile(file) {
         updateInjection();
         renderPanel();
         toastSuccess(
-            `导入完成：${importedCount ? `新增 ${importedCount} 条摘要` : "未导入摘要"}${settingsImported ? "，已更新插件设置" : ""}`
+            `导入完成：${importedCount ? `新增 ${importedCount} 条摘要` : "未导入摘要"}${importedCoreCount ? `，新增 ${importedCoreCount} 条核心记忆` : ""}${settingsImported ? "，已更新插件设置" : ""}`
         );
     } finally {
         if (importBtn) importBtn.disabled = false;
@@ -841,6 +1049,8 @@ function syncSettingsToForm() {
     setVal("mem-inject-n", s.injectCount);
     setVal("mem-wi-depth", s.wiDepth);
     setVal("mem-wi-role", s.wiRole);
+    setVal("mem-core-prompt", s.corePromptTemplate);
+    setVal("mem-core-inject-n", s.coreInjectCount);
     populateWiPositionSelect();
     toggleWiAtDepthRow();
 }
@@ -947,7 +1157,28 @@ function buildPanelHtml() {
                 <hr/>
 
                 <div class="mem-row mem-inline">
+                    <hr/>
+                <div class="mem-section-title"><i class="fa-solid fa-gem"></i> 核心记忆</div>
+                <div class="mem-hint">
+                    核心记忆的优先级高于长期记忆，注入时会标记为"绝对不可违反"。
+                    从下方长期记忆列表中勾选条目，然后点击"提取核心"按钮。
+                </div>
+                <div class="mem-row">
+                    <label>核心记忆提取提示词（用 {{content}} 代表选中的摘要内容）：</label>
+                    <textarea id="mem-core-prompt" rows="4">${escapeHtml(s.corePromptTemplate)}</textarea>
+                </div>
+                <div class="mem-row mem-inline">
+                    <label>注入最近核心记忆条数：<input type="number" id="mem-core-inject-n" min="1" value="${s.coreInjectCount}" style="width:60px"/></label>
+                </div>
+                <div id="mem-core-status" class="mem-row mem-status"></div>
+                <div id="mem-core-list" class="mem-summary-list"></div>
+
+                <hr/>
+                <div class="mem-section-title"><i class="fa-solid fa-book-open"></i> 长期记忆</div>
+
+                <div class="mem-row mem-inline">
                     <button id="mem-copy-all" class="menu_button"><i class="fa-solid fa-copy"></i> 复制全部总结</button>
+                    <button id="mem-core-summarize-btn" class="menu_button mem-btn-core"><i class="fa-solid fa-gem"></i> 从选中的长期记忆提取核心</button>
                 </div>
 
                 <div class="mem-row mem-inline">
@@ -970,6 +1201,7 @@ function buildPanelHtml() {
                 </div>
 
                 <div id="mem-summary-list" class="mem-summary-list"></div>
+                <div id="mem-summary-pagination" class="mem-row mem-inline" style="justify-content:center"></div>
             </div>
         </div>
     </div>
@@ -981,12 +1213,15 @@ function buildSummaryItemHtml(entry) {
         ? '<span class="mem-badge mem-badge-auto">自动</span>'
         : '<span class="mem-badge mem-badge-manual">手动</span>';
     const charCount = (entry.content || "").length;
+    const rangeStart = Array.isArray(entry.range) ? entry.range[0] + 1 : "?";
+    const rangeEnd = Array.isArray(entry.range) ? entry.range[1] : "?";
     return `
     <div class="mem-summary-item" data-id="${entry.id}">
         <div class="mem-summary-header">
             <div class="mem-summary-header-left">
+                <input type="checkbox" class="mem-select-for-core" data-id="${entry.id}" title="选中以提取核心记忆" />
                 ${badge}
-                <span>消息 ${entry.range[0] + 1}-${entry.range[1]} · ${charCount} 字</span>
+                <span>消息 ${rangeStart}-${rangeEnd} · ${charCount} 字</span>
             </div>
             <div class="mem-summary-time" title="真实的总结完成时间">${escapeHtml(entry.time)}</div>
         </div>
@@ -1000,6 +1235,51 @@ function buildSummaryItemHtml(entry) {
     </div>
     `;
 }
+
+function buildCoreMemoryItemHtml(entry) {
+    const charCount = (entry.content || "").length;
+    return `
+    <div class="mem-summary-item mem-core-item" data-id="${entry.id}">
+        <div class="mem-summary-header">
+            <div class="mem-summary-header-left">
+                <span class="mem-badge mem-badge-core">核心</span>
+                <span>${charCount} 字</span>
+            </div>
+            <div class="mem-summary-time" title="真实的总结完成时间">${escapeHtml(entry.time)}</div>
+        </div>
+        <textarea class="mem-core-text" data-id="${entry.id}" rows="3">${escapeHtml(entry.content)}</textarea>
+        <div class="mem-summary-actions">
+            <button class="menu_button mem-core-copy" data-id="${entry.id}"><i class="fa-solid fa-copy"></i> 复制</button>
+            <button class="menu_button mem-core-delete danger" data-id="${entry.id}"><i class="fa-solid fa-trash"></i> 删除</button>
+        </div>
+    </div>
+    `;
+}
+
+function renderCoreMemories() {
+    const coreList = document.getElementById("mem-core-list");
+    const coreStatus = document.getElementById("mem-core-status");
+    if (!coreList) return;
+    const data = getChatData();
+    const cores = data.coreMemories || [];
+
+    if (coreStatus) {
+        const totalChars = cores.reduce((sum, x) => sum + (x.content ? x.content.length : 0), 0);
+        const lastCore = cores.length > 0 ? cores[cores.length - 1] : null;
+        coreStatus.innerHTML = cores.length > 0
+            ? `<div class="mem-status-line"><span>核心记忆：<b>${cores.length}</b> 条 · 共 <b>${totalChars}</b> 字 · 上次更新：${escapeHtml(lastCore.time)}</span></div>`
+            : `<div class="mem-status-line"><span>暂无核心记忆</span></div>`;
+    }
+
+    if (cores.length === 0) {
+        coreList.innerHTML = `<div class="mem-empty-hint">暂无核心记忆，从下方长期记忆中勾选条目后点击"提取核心"</div>`;
+        return;
+    }
+    coreList.innerHTML = cores.slice().reverse().map(buildCoreMemoryItemHtml).join("");
+}
+
+// 运行时状态：长期记忆列表是否已展开全部
+let summaryShowAll = false;
 
 function populateWorldBookSelect() {
     const select = document.getElementById("mem-wi-book");
@@ -1034,18 +1314,22 @@ function updateStatusLine() {
     const s = getSettings();
     const context = getContext();
     const data = getChatData();
-    const total = (context.chat || []).length;
+    const chat = context.chat || [];
+    const total = chat.length;
+    // 可总结消息数：排除系统消息和空消息，和 formatMessagesForPrompt 的过滤口径一致
+    const summarizable = chat.filter((m) => !m.is_system && stripHtml(m.mes)).length;
     const pending = Math.max(0, total - data.lastSummarizedIndex);
     const pct = Math.min(100, Math.round((pending / Math.max(1, s.messagesPerSummary)) * 100));
     const remain = Math.max(0, s.messagesPerSummary - pending);
     const lastEntry = data.summaries.length > 0 ? data.summaries[data.summaries.length - 1] : null;
     const lastTime = lastEntry ? lastEntry.time : "尚未总结过";
     const totalChars = data.summaries.reduce((sum, x) => sum + (x.content ? x.content.length : 0), 0);
+    const coreCount = (data.coreMemories || []).length;
     const autoNote = s.autoSummarize ? "" : "（自动总结当前已关闭）";
 
     statusDiv.innerHTML = `
         <div class="mem-status-line">
-            <span>共 <b>${total}</b> 条消息 · 已有 <b>${data.summaries.length}</b> 条摘要 · 共 <b>${totalChars}</b> 字</span>
+            <span>共 <b>${summarizable}</b> 条可总结消息${summarizable !== total ? `（含系统消息共 ${total} 条）` : ""} · 长期记忆 <b>${data.summaries.length}</b> 条 · 核心记忆 <b>${coreCount}</b> 条 · 共 <b>${totalChars}</b> 字</span>
         </div>
         <div class="mem-status-line mem-status-sub">
             <span>上次更新：${escapeHtml(lastTime)}</span>
@@ -1063,22 +1347,113 @@ function renderPanel() {
     const container = document.getElementById("mem-summarizer-panel");
     if (!container) return;
     const data = getChatData();
+    const settings = getSettings();
     updateStatusLine();
+    renderCoreMemories();
+
     const list = document.getElementById("mem-summary-list");
+    const paginationDiv = document.getElementById("mem-summary-pagination");
     if (!list) return;
+
     if (data.summaries.length === 0) {
         list.innerHTML = `<div class="mem-empty-hint">暂无总结记录，点击上方"立即总结一次"开始，或等待自动总结触发</div>`;
+        if (paginationDiv) paginationDiv.innerHTML = "";
         return;
     }
-    list.innerHTML = data.summaries
-        .slice()
-        .reverse()
-        .map(buildSummaryItemHtml)
-        .join("");
+
+    // 按时间倒序排列（最新的在前面）
+    const reversed = data.summaries.slice().reverse();
+    const pageSize = settings.summaryPageSize || 20;
+    const total = reversed.length;
+
+    if (total <= pageSize || summaryShowAll) {
+        // 条数不多或者用户点了"展开全部"，全部渲染
+        list.innerHTML = reversed.map(buildSummaryItemHtml).join("");
+        if (paginationDiv) {
+            if (total > pageSize && summaryShowAll) {
+                paginationDiv.innerHTML = `<button id="mem-show-less" class="menu_button"><i class="fa-solid fa-chevron-up"></i> 收起，只显示最近 ${pageSize} 条</button>`;
+            } else {
+                paginationDiv.innerHTML = "";
+            }
+        }
+    } else {
+        // 只渲染前 pageSize 条
+        list.innerHTML = reversed.slice(0, pageSize).map(buildSummaryItemHtml).join("");
+        if (paginationDiv) {
+            paginationDiv.innerHTML = `<button id="mem-show-all" class="menu_button"><i class="fa-solid fa-chevron-down"></i> 还有 ${total - pageSize} 条，点击展开全部</button>`;
+        }
+    }
 }
 
 function bindPanelEvents() {
     const s = getSettings();
+
+    // --- 核心记忆设置 ---
+    document.getElementById("mem-core-prompt")?.addEventListener("change", (e) => {
+        s.corePromptTemplate = e.target.value;
+        saveSettings();
+    });
+    document.getElementById("mem-core-inject-n")?.addEventListener("change", (e) => {
+        s.coreInjectCount = Math.max(1, parseInt(e.target.value) || 1);
+        saveSettings();
+        updateInjection();
+    });
+
+    // 提取核心按钮
+    document.getElementById("mem-core-summarize-btn")?.addEventListener("click", async () => {
+        const checkboxes = document.querySelectorAll(".mem-select-for-core:checked");
+        const selectedIds = Array.from(checkboxes).map((cb) => cb.dataset.id);
+        await runCoreSummarization(selectedIds);
+    });
+
+    // 核心记忆列表事件委托
+    document.getElementById("mem-core-list")?.addEventListener("click", (e) => {
+        const target = e.target.closest("button");
+        const id = target?.dataset?.id;
+        if (!id) return;
+        const data = getChatData();
+        const cores = data.coreMemories || [];
+        const idx = cores.findIndex((x) => x.id === id);
+        if (idx === -1) return;
+
+        if (target.classList.contains("mem-core-copy")) {
+            copyToClipboard(cores[idx].content, "已复制该条核心记忆");
+        } else if (target.classList.contains("mem-core-delete")) {
+            if (!confirm("删除这条核心记忆？删除后不可恢复。")) return;
+            cores.splice(idx, 1);
+            saveChatData();
+            updateInjection();
+            renderPanel();
+        }
+    });
+
+    // 核心记忆文本编辑保存
+    document.getElementById("mem-core-list")?.addEventListener("change", (e) => {
+        const target = e.target;
+        if (!target.classList.contains("mem-core-text")) return;
+        const id = target.dataset.id;
+        const data = getChatData();
+        const cores = data.coreMemories || [];
+        const entry = cores.find((x) => x.id === id);
+        if (entry) {
+            entry.content = target.value;
+            saveChatData();
+            updateInjection();
+        }
+    });
+
+    // 分页按钮事件委托
+    document.getElementById("mem-summary-pagination")?.addEventListener("click", (e) => {
+        const target = e.target.closest("button");
+        if (!target) return;
+        if (target.id === "mem-show-all") {
+            summaryShowAll = true;
+            renderPanel();
+        } else if (target.id === "mem-show-less") {
+            summaryShowAll = false;
+            renderPanel();
+        }
+    });
 
     document.getElementById("mem-count").addEventListener("change", (e) => {
         s.messagesPerSummary = Math.max(1, parseInt(e.target.value) || 1);
@@ -1299,6 +1674,8 @@ if (window.__memSummarizerLoaded) {
         eventSource.on(event_types.MESSAGE_SENT, onChatEvent);
         eventSource.on(event_types.MESSAGE_DELETED, onMessageDeleted);
         eventSource.on(event_types.CHAT_CHANGED, () => {
+            manualReminderCount = 0;
+            summaryShowAll = false;
             renderPanel();
             updateInjection();
         });
