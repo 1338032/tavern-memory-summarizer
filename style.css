@@ -35,6 +35,12 @@
     box-sizing: border-box;
 }
 
+.mem-summarizer-panel select:disabled,
+.mem-summarizer-panel input:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
 .mem-summarizer-panel .menu_button {
     min-height: 34px;
     padding: 4px 12px;
@@ -61,12 +67,14 @@
     cursor: not-allowed;
 }
 
-/* 危险操作按钮：清空/删除 */
-.mem-summarizer-panel .menu_button.danger {
+/* 危险操作按钮：清空/删除/重置 */
+.mem-summarizer-panel .menu_button.danger,
+.mem-modal .menu_button.danger {
     color: #e05a5a;
     border-color: rgba(224, 90, 90, 0.4);
 }
-.mem-summarizer-panel .menu_button.danger:hover {
+.mem-summarizer-panel .menu_button.danger:hover,
+.mem-modal .menu_button.danger:hover {
     background: rgba(224, 90, 90, 0.15);
 }
 
@@ -136,14 +144,30 @@
     background: rgba(255, 255, 255, 0.03);
 }
 
-.mem-summary-meta {
-    font-size: 0.8em;
-    opacity: 0.75;
+/* 条目头部：左边徽章+范围/字数，右上角显示真实的总结完成时间 */
+.mem-summary-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 8px;
     margin-bottom: 6px;
+    flex-wrap: wrap;
+}
+
+.mem-summary-header-left {
     display: flex;
     align-items: center;
     flex-wrap: wrap;
-    gap: 4px;
+    gap: 6px;
+    font-size: 0.8em;
+    opacity: 0.85;
+}
+
+.mem-summary-time {
+    font-size: 0.75em;
+    opacity: 0.6;
+    white-space: nowrap;
+    margin-left: auto;
 }
 
 .mem-badge {
@@ -176,11 +200,91 @@
     min-width: 140px;
 }
 
+/* ------------------------ 通用确认/预览弹窗 ------------------------ */
+
+.mem-modal-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.55);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 9999;
+    padding: 16px;
+}
+
+.mem-modal {
+    background: var(--SmartThemeBlurTintColor, #1e1e1e);
+    border: 1px solid var(--SmartThemeBorderColor, #555);
+    border-radius: 10px;
+    padding: 16px;
+    max-width: 480px;
+    width: 100%;
+    max-height: 85vh;
+    overflow-y: auto;
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
+}
+
+.mem-modal-title {
+    font-weight: 600;
+    font-size: 1.05em;
+    margin-bottom: 10px;
+}
+
+.mem-modal-body {
+    font-size: 0.9em;
+    line-height: 1.6;
+}
+
+.mem-modal-line {
+    margin: 4px 0;
+    word-break: break-word;
+}
+
+.mem-modal-check {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin: 10px 0;
+    font-size: 0.9em;
+    cursor: pointer;
+}
+.mem-modal-check input:disabled {
+    opacity: 0.5;
+}
+
+.mem-preview-textarea {
+    width: 100%;
+    min-height: 120px;
+    margin-top: 6px;
+    font-size: 0.85em;
+    box-sizing: border-box;
+    resize: vertical;
+    background: var(--SmartThemeBotMesBlurTintColor, rgba(128, 128, 128, 0.08));
+    color: inherit;
+    border: 1px solid var(--SmartThemeBorderColor, #555);
+    border-radius: 6px;
+    padding: 6px 8px;
+}
+
+.mem-modal-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 14px;
+}
+
 @media (max-width: 420px) {
     .mem-summarizer-panel .mem-inline {
         gap: 8px 14px;
     }
     .mem-summary-actions .mem-wi-keys {
         flex-basis: 100%;
+    }
+    .mem-modal {
+        padding: 14px;
+    }
+    .mem-summary-time {
+        margin-left: 0;
     }
 }

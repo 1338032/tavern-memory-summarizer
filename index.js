@@ -1,25 +1,47 @@
 // ============================================================
-// 记忆总结助手 Memory Summarizer  v1.1.0
+// 记忆总结助手 Memory Summarizer  v1.2.0
 // 一个 SillyTavern 第三方扩展：
 //   - 按设定条数自动/手动把最近的对话喂给 AI 生成摘要
-//   - 摘要保存在扩展内，可编辑、复制
+//   - 每次总结生成一个独立条目，新条目追加在旧条目下方，可编辑、删除、复制
 //   - 支持"自动注入上下文"（相当于引用到预设）
-//   - 支持"写入世界书条目"
+//   - 支持"写入世界书条目"（可选插入位置，写入前会弹出预览确认）
 //   - 支持总结时携带最近旧摘要作为"风格参考"，统一多次总结的文风（不会重新总结旧摘要）
+//   - 支持导入 / 导出本聊天的记忆数据与插件设置
 //
-// v1.1.0 更新：
-//   - 新增"风格参考"：总结新内容时可选携带最近 N 条旧摘要发给 AI，
-//     并在提示词中明确告知"这些仅供参考、不需要重新总结"，用于统一摘要风格。
-//     旧摘要本身绝不会被修改或重新生成，新摘要始终追加在数组末尾。
-//   - 自动总结触发、成功、失败均有 toast 提示；失败提示会带上具体原因。
-//   - 修复：自动模式下如果积压消息超过设定条数，此前会把全部积压一次性塞给 AI
-//     （可能非常长/浪费token），现在自动模式固定按"设定条数"分块处理。
-//   - 修复：连续触发（比如用户发送消息与AI回复几乎同时到达）可能导致同一段
-//     对话被并发总结两次，现在加了执行锁。
-//   - 修复：总结内容中若包含 </textarea> 等片段会破坏面板渲染，现在做了转义。
-//   - 修复：总结进行到一半切换聊天，结果可能被错误地写入旧聊天的场景，现在会检测并放弃过期结果。
-//   - 界面：新增进度条、自动/手动标签、加载状态、空状态提示、世界书列表刷新按钮，
-//     记住折叠面板的展开/收起状态，整体在手机浏览器上更好点按。
+// v1.2.0 更新（本次修改）：
+//   - 【数据】每条摘要都有独立、真实的总结完成时间，现在显示在条目右上角；
+//     面板顶部新增"总字数 / 总条目 / 上次更新时间"统计。
+//   - 【数据安全】删除单条摘要 / 清空摘要文本都不会让对应消息退回"待总结"状态，
+//     避免同一段对话被重复计入总结、重复消耗 Token（这一点在 v1.1.0 已经成立，
+//     本次补充了明确的代码注释和 UI 提示，避免被后续修改误改掉）。
+//   - 【重要修复】清空摘要与重置总结进度不再是同一个按钮：
+//     旧版本"清空全部总结"会同时把 lastSummarizedIndex 归零，导致清空后如果开着自动总结，
+//     全部聊天记录立刻被视为"待总结"，可能连续触发大量总结请求、消耗大量 Token。
+//     现在拆成两个独立按钮："清空摘要文本"（只删文本，进度不变）和
+//     "重置总结进度"（只重置进度指针，文本不受影响），并且都有二次确认说明后果。
+//   - 【重要修复】自动注入上下文时的"自我污染"问题：开启"自动注入"后，生成新摘要时
+//     （调用 generateQuietPrompt 的安静生成）之前注入的"剧情记忆摘要"会被酒馆的
+//     prompt 组装逻辑一起带上，导致总结这次新内容时重复消耗一份旧摘要的 token、
+//     也污染了总结本身的输入。现在总结开始前会先清空本插件自己的注入槽位，
+//     总结结束（无论成功/失败/中途切换聊天）后再恢复。
+//   - 【重要修复】删除或编辑某条摘要后，如果它正好在"自动注入"的最近 N 条范围内，
+//     之前会导致已经注入到聊天里的内容和面板上看到的内容不一致（残留旧文本）。
+//     现在删除、编辑、清空摘要文本后都会重新计算一次注入内容；
+//     摘要被清空到 0 条时，之前残留的注入内容也会被正确清掉，而不是一直挂着。
+//   - 【世界书】写入前新增预览确认弹窗：写入哪个世界书、插入到什么位置、关键词、
+//     完整内容都会先列出来，确认后才会真正写入，避免手滑写错。
+//     插入位置改为从当前酒馆版本实际支持的位置列表中动态读取并展示，
+//     版本不支持时会禁用该选择器并提示，不会盲目写入一个不存在的位置值。
+//     如果完全不想用世界书，用"复制全部总结"手动粘贴即可，不写入不会有任何自动行为。
+//   - 【健壮性】新增页面级重复初始化保护：如果模块被重复执行（比如某些环境下的
+//     热重载），会跳过第二次的事件绑定，避免同一条消息触发两次总结。
+//   - 【健壮性】监听消息删除事件：消息被删除导致总数变少时，会把总结进度指针
+//     夹回合法范围，避免出现"待总结数"变成负数、面板卡在奇怪状态的问题。
+//   - 【新增】导入 / 导出：可以把当前聊天的全部摘要 + 总结进度 + 插件设置导出成一个
+//     JSON 文件，方便备份或换设备；导入时可以分别选择只导入摘要、只导入设置，
+//     或者两者都要，摘要会追加在当前聊天已有摘要之后，绝不覆盖已有数据。
+//   - 【继承 v1.1.0】风格参考、自动分块总结、执行锁防并发、内容转义防注入、
+//     总结中途切换聊天检测等此前的修复均保留，未做改动。
 // ============================================================
 
 import {
@@ -68,6 +90,9 @@ const defaultSettings = {
     injectRole: "system",             // system / user / assistant
     injectCount: 3,                   // 注入时合并最近几条摘要
     panelOpen: false,                 // 记住面板展开/收起状态
+    wiPosition: "",                   // 写入世界书时使用的插入位置键名（从当前酒馆版本动态探测）
+    wiDepth: 4,                       // 位置为"指定深度"时使用
+    wiRole: "system",                 // 位置为"指定深度"时使用：system / user / assistant
 };
 
 // 每个"聊天"独立保存的数据（摘要内容 + 计数指针），存在 chat_metadata 里，
@@ -101,7 +126,7 @@ function getSettings() {
     if (!extension_settings[MODULE_NAME]) {
         extension_settings[MODULE_NAME] = structuredClone(defaultSettings);
     }
-    // 兼容旧版本缺字段的情况
+    // 兼容旧版本缺字段的情况（包括本次新增的 wiPosition/wiDepth/wiRole）
     for (const key of Object.keys(defaultSettings)) {
         if (extension_settings[MODULE_NAME][key] === undefined) {
             extension_settings[MODULE_NAME][key] = defaultSettings[key];
@@ -142,8 +167,10 @@ function stripHtml(str) {
     return String(str || "").replace(/<[^>]*>/g, "").trim();
 }
 
-// 转义要塞进 innerHTML 模板里的文本（总结内容来自 AI/用户输入，不可信任），
-// 防止内容里出现 </textarea>、<script> 等片段破坏面板或引发意外行为
+// 转义要塞进 innerHTML 模板里的文本（总结内容来自 AI/用户输入/导入文件，都不可信任），
+// 防止内容里出现 </textarea>、<script> 等片段破坏面板或引发意外行为。
+// 约定：本文件里所有拼 innerHTML 字符串模板时，凡是来自 AI/用户/文件的动态内容，
+// 必须经过这个函数再拼进去；不允许出现 innerHTML = 未转义的动态内容。
 function escapeHtml(str) {
     return String(str ?? "")
         .replace(/&/g, "&amp;")
@@ -187,10 +214,100 @@ function fallbackCopy(text, successMsg) {
     document.body.removeChild(ta);
 }
 
+function el(html) {
+    const t = document.createElement("template");
+    t.innerHTML = html.trim();
+    return t.content.firstElementChild;
+}
+
+// 触发浏览器下载一个 JSON 文件
+function downloadJsonFile(filename, dataObj) {
+    try {
+        const json = JSON.stringify(dataObj, null, 2);
+        const blob = new Blob([json], { type: "application/json" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 2000);
+        return true;
+    } catch (e) {
+        console.error("[记忆总结助手] 导出文件失败：", e);
+        toastError(`导出失败：${extractErrorReason(e)}`);
+        return false;
+    }
+}
+
+// ------------------------ 通用确认/预览弹窗 ------------------------
+// 用于"写入世界书前预览确认"和"导入数据前确认"等需要展示较多信息的场景，
+// 不依赖酒馆内部的弹窗 API（不同版本可能没有/签名不同），完全自成一体，
+// 不会因为酒馆更新而失效；点击遮罩层、按 Esc、点取消都视为"取消"。
+//
+// bodyHtml 由调用方负责把其中的动态内容用 escapeHtml 处理好之后再传入。
+// onConfirm 可选：点击"确认"按钮时会同步调用，参数是弹窗内容区域的 DOM 节点，
+// 可以在这里读取用户填的选项，返回值会成为 Promise 的 resolve 结果；
+// 不传时确认按钮的 resolve 结果固定为 true。取消/关闭统一 resolve 为 false。
+function showModal({ title, bodyHtml, confirmText = "确认", cancelText = "取消", showCancel = true, danger = false, onConfirm = null }) {
+    return new Promise((resolve) => {
+        let settled = false;
+        const overlay = el(`<div class="mem-modal-overlay"></div>`);
+        const modal = el(`
+            <div class="mem-modal">
+                <div class="mem-modal-title">${escapeHtml(title || "")}</div>
+                <div class="mem-modal-body"></div>
+                <div class="mem-modal-actions">
+                    ${showCancel ? `<button type="button" class="menu_button mem-modal-cancel">${escapeHtml(cancelText)}</button>` : ""}
+                    <button type="button" class="menu_button mem-modal-confirm ${danger ? "danger" : "mem-btn-primary"}">${escapeHtml(confirmText)}</button>
+                </div>
+            </div>
+        `);
+        const bodyEl = modal.querySelector(".mem-modal-body");
+        bodyEl.innerHTML = bodyHtml || "";
+        overlay.appendChild(modal);
+
+        function cleanup(result) {
+            if (settled) return;
+            settled = true;
+            document.removeEventListener("keydown", onKeydown);
+            overlay.remove();
+            resolve(result);
+        }
+        function onKeydown(e) {
+            if (e.key === "Escape") cleanup(false);
+        }
+        overlay.addEventListener("click", (e) => {
+            if (e.target === overlay) cleanup(false);
+        });
+        modal.querySelector(".mem-modal-confirm").addEventListener("click", () => {
+            let result = true;
+            if (typeof onConfirm === "function") {
+                try {
+                    result = onConfirm(bodyEl);
+                } catch (e) {
+                    console.error("[记忆总结助手] 弹窗确认回调出错：", e);
+                    result = true;
+                }
+            }
+            cleanup(result);
+        });
+        const cancelBtn = modal.querySelector(".mem-modal-cancel");
+        if (cancelBtn) cancelBtn.addEventListener("click", () => cleanup(false));
+
+        document.addEventListener("keydown", onKeydown);
+        document.body.appendChild(overlay);
+    });
+}
+
 // ------------------------ 拼装最终发给 AI 的提示词 ------------------------
 // 如果开启了"风格参考"，会把最近 N 条旧摘要一起发给 AI，并明确告知
 // 这些内容不需要重新总结，只是用来统一多次总结之间的写作风格/语气/剧情脉络。
 // 旧摘要数据本身不会被这个函数修改。
+// 注意：这里的"风格参考"是显式拼进 prompt 正文的旧摘要，跟"自动注入上下文"
+// （通过 setExtensionPrompt 挂到聊天补全流程里的旧摘要）是两套独立机制，
+// 后者在 runSummarization 里会在总结期间被临时清空，避免和这里重复。
 function buildFinalPrompt(newContent) {
     const s = getSettings();
     const data = getChatData();
@@ -218,6 +335,9 @@ async function runSummarization(manual = false) {
     const chat = context.chat || [];
     const data = getChatData();
 
+    // 这里到下面 `isSummarizing = true` 之间全部是同步代码，没有任何 await，
+    // JS 单线程执行不会在中间被打断，所以即使 MESSAGE_SENT / MESSAGE_RECEIVED
+    // 几乎同时触发，也不会出现两次总结同时跑、重复消耗 token 的竞态问题。
     if (isSummarizing) {
         if (manual) toastInfo("已有一次总结正在进行中，请稍候…");
         return;
@@ -271,6 +391,15 @@ async function runSummarization(manual = false) {
     // 不能用数组引用来判断是否切换了聊天，必须用 chatId。
     const chatIdSnapshot = context.chatId;
 
+    // 总结这次新内容之前，先清空本插件自己的 extension prompt 注入槽位。
+    // 原因：如果开着"自动注入"，这个槽位里正放着"最近几条摘要"；而 generateQuietPrompt
+    // 走的是酒馆同一套 prompt 组装逻辑，并不会因为是"安静生成"就自动跳过它——
+    // 如果不清空，等于总结这次新内容时又把旧摘要额外喂给 AI 一次，
+    // 白白多花 token，也污染了这次总结本身的输入。
+    // 总结流程结束后（成功/失败/中途切换聊天都算）在 finally 里用 updateInjection()
+    // 按当前设置重新计算一遍，恢复成正常聊天时该有的注入内容，不影响之后的对话。
+    context.setExtensionPrompt(MODULE_NAME, "", extension_prompt_types.IN_PROMPT, 0);
+
     try {
         if (typeof context.generateQuietPrompt !== "function") {
             throw new Error("当前酒馆版本未找到 generateQuietPrompt 接口，可能与本扩展不兼容");
@@ -292,26 +421,25 @@ async function runSummarization(manual = false) {
 
         const entry = {
             id: `${Date.now()}`,
-            time: new Date().toLocaleString(),
+            time: new Date().toLocaleString(), // 这条摘要真实的生成完成时间，用于条目右上角显示
             range: [startIdx, endIdx],
             content: trimmed,
             auto: !manual,
         };
-        data.summaries.push(entry);
+        data.summaries.push(entry); // 新条目始终追加在数组末尾（旧条目下方）
         data.lastSummarizedIndex = endIdx;
         saveChatData();
 
         toastSuccess(`${manual ? "手动" : "自动"}总结完成（消息 ${startIdx + 1}-${endIdx}）`);
-
-        if (settings.autoInject) {
-            updateInjection();
-        }
     } catch (e) {
         console.error("[记忆总结助手] 生成总结失败：", e);
         toastError(`总结失败：${extractErrorReason(e)}`, { timeOut: 8000, extendedTimeOut: 4000 });
     } finally {
         isSummarizing = false;
         setRunButtonLoading(false);
+        // 无论成功/失败/中途切换聊天，都要把注入槽位恢复成当前设置该有的样子，
+        // 避免出现"总结时清空了、结果没人给它设回去"的注入丢失问题。
+        updateInjection();
         renderPanel();
     }
 }
@@ -329,7 +457,13 @@ function updateInjection() {
     }
 
     const recent = data.summaries.slice(-settings.injectCount);
-    if (recent.length === 0) return;
+    if (recent.length === 0) {
+        // 摘要被删空之后，如果不在这里也清空之前注入的内容，
+        // 之前注入的旧文本会一直挂在 prompt 组装里，即使摘要已经不存在了——
+        // 这正是"自动注入有上下文污染风险"里要检查的情况之一。
+        context.setExtensionPrompt(MODULE_NAME, "", extension_prompt_types.IN_PROMPT, 0);
+        return;
+    }
 
     const combined =
         "【剧情记忆摘要】\n" + recent.map((s) => `- ${s.content}`).join("\n");
@@ -356,16 +490,67 @@ function updateInjection() {
 
 // ------------------------ 写入世界书 ------------------------
 
-async function writeToWorldInfo(bookName, content, keysStr) {
+// 位置枚举键名 -> 中文说明。键名以当前酒馆版本实际导出的 world_info_position
+// 对象为准动态探测，这里的表只是用来把常见键名翻译成好读的中文；
+// 探测到了但表里没有的键名会直接显示原始键名，不会因为翻译表没覆盖到就出错。
+const WI_POSITION_LABELS = {
+    before: "角色定义之前（Before Char）",
+    after: "角色定义之后（After Char）",
+    EMTop: "示例对话之前（Before Example Msgs）",
+    EMBottom: "示例对话之后（After Example Msgs）",
+    ANTop: "作者注释顶部（Top of AN）",
+    ANBottom: "作者注释底部（Bottom of AN）",
+    atDepth: "指定深度（@Depth）",
+    outlet: "输出插槽（Outlet）",
+};
+
+function populateWiPositionSelect() {
+    const select = document.getElementById("mem-wi-position");
+    if (!select) return;
+    const s = getSettings();
+    select.innerHTML = "";
+
+    const posObj = WI_API?.world_info_position;
+    if (!posObj || typeof posObj !== "object" || Object.keys(posObj).length === 0) {
+        select.appendChild(el(`<option value="">（当前酒馆版本不支持选择写入位置，将使用世界书默认位置）</option>`));
+        select.disabled = true;
+        return;
+    }
+
+    select.disabled = false;
+    const keys = Object.keys(posObj);
+    for (const key of keys) {
+        const label = WI_POSITION_LABELS[key] || key;
+        select.appendChild(el(`<option value="${escapeHtml(key)}">${escapeHtml(label)}</option>`));
+    }
+    if (keys.includes(s.wiPosition)) {
+        select.value = s.wiPosition;
+    } else {
+        // 存的设置在当前版本里找不到对应位置（比如换了台设备、换了酒馆版本），
+        // 自动回退到第一个可用位置，而不是报错或者保持一个无效的空值。
+        s.wiPosition = keys[0];
+        select.value = keys[0];
+        saveSettings();
+    }
+}
+
+function toggleWiAtDepthRow() {
+    const row = document.getElementById("mem-wi-atdepth-row");
+    const select = document.getElementById("mem-wi-position");
+    if (!row || !select) return;
+    row.style.display = select.value === "atDepth" ? "flex" : "none";
+}
+
+async function writeToWorldInfo(bookName, content, keysStr, positionKey, depth, role) {
     if (!WI_API) {
         toastError("世界书接口未加载成功，无法直接写入，请使用复制按钮手动粘贴");
-        return;
+        return false;
     }
     try {
         const data = await WI_API.loadWorldInfo(bookName);
         if (!data) {
             toastError("找不到该世界书，请先在酒馆里创建/选择一个世界书");
-            return;
+            return false;
         }
         const entry = WI_API.createWorldInfoEntry(bookName, data);
         const keys = (keysStr || "")
@@ -376,14 +561,88 @@ async function writeToWorldInfo(bookName, content, keysStr) {
         entry.content = content;
         entry.key = keys;
         entry.constant = keys.length === 0; // 没填关键词就设为常驻条目
+
+        // 只有当前版本真的支持这个位置键名时才去设置，找不到就保持世界书自己的默认值，
+        // 绝不往条目里塞一个凭空猜的数值把条目写坏。
+        const posObj = WI_API.world_info_position;
+        if (posObj && positionKey && posObj[positionKey] !== undefined) {
+            entry.position = posObj[positionKey];
+            if (positionKey === "atDepth") {
+                if (Number.isFinite(depth)) entry.depth = depth;
+                const roleMap = {
+                    system: extension_prompt_roles.SYSTEM,
+                    user: extension_prompt_roles.USER,
+                    assistant: extension_prompt_roles.ASSISTANT,
+                };
+                if (roleMap[role] !== undefined) entry.role = roleMap[role];
+            }
+        }
+
         await WI_API.saveWorldInfo(bookName, data, true);
         toastSuccess(`已写入世界书《${bookName}》`);
+        return true;
     } catch (e) {
         console.error("[记忆总结助手] 写入世界书失败：", e);
         toastError(
             `写入世界书失败：${extractErrorReason(e)}（可改用复制按钮手动粘贴）`,
             { timeOut: 8000, extendedTimeOut: 4000 }
         );
+        return false;
+    }
+}
+
+// 点击"写入世界书"按钮的入口：先弹出预览确认框，用户确认之后才真正写入。
+async function openWiWritePreview(entry, triggerBtn) {
+    const s = getSettings();
+    const bookSelect = document.getElementById("mem-wi-book");
+    const bookName = bookSelect?.value;
+    if (!bookName) {
+        toastError("请先选择一个世界书");
+        return;
+    }
+    const list = document.getElementById("mem-summary-list");
+    const keysInput = list?.querySelector(`.mem-wi-keys[data-id="${entry.id}"]`);
+    const keys = (keysInput?.value || "")
+        .split(",")
+        .map((x) => x.trim())
+        .filter(Boolean);
+
+    const posObj = WI_API?.world_info_position;
+    const positionLabel =
+        posObj && s.wiPosition && posObj[s.wiPosition] !== undefined
+            ? (WI_POSITION_LABELS[s.wiPosition] || s.wiPosition)
+            : "（世界书默认位置）";
+
+    const bodyHtml = `
+        <div class="mem-modal-line">目标世界书：<b>${escapeHtml(bookName)}</b></div>
+        <div class="mem-modal-line">插入位置：${escapeHtml(positionLabel)}</div>
+        <div class="mem-modal-line">关键词：${keys.length ? escapeHtml(keys.join("、")) : "（留空，将设为常驻条目）"}</div>
+        <div class="mem-modal-line">内容预览（共 ${entry.content.length} 字）：</div>
+        <textarea class="mem-preview-textarea" readonly>${escapeHtml(entry.content)}</textarea>
+    `;
+
+    if (triggerBtn) triggerBtn.disabled = true;
+    try {
+        const confirmed = await showModal({
+            title: "写入世界书前确认",
+            bodyHtml,
+            confirmText: "确认写入",
+            cancelText: "取消",
+        });
+        if (!confirmed) return;
+
+        // 弹窗展示期间聊天/摘要状态可能已经变化（比如这条摘要被删除了），
+        // 真正写入之前用 id 重新取一次最新内容，避免写入过期或不存在的数据。
+        const freshData = getChatData();
+        const fresh = freshData.summaries.find((x) => x.id === entry.id);
+        if (!fresh) {
+            toastError("这条总结已被删除，写入已取消");
+            return;
+        }
+
+        await writeToWorldInfo(bookName, fresh.content, keysInput?.value, s.wiPosition, s.wiDepth, s.wiRole);
+    } finally {
+        if (triggerBtn) triggerBtn.disabled = false;
     }
 }
 
@@ -404,13 +663,189 @@ async function onChatEvent() {
     renderPanel();
 }
 
-// ------------------------ UI 渲染 ------------------------
-
-function el(html) {
-    const t = document.createElement("template");
-    t.innerHTML = html.trim();
-    return t.content.firstElementChild;
+// 消息被删除时，把总结进度指针夹回合法范围，避免出现负数待总结数导致的卡死状态。
+// 局限说明：如果被删除的是较早、已经计入过总结范围的消息，摘要内容和实际消息之间
+// 的对应关系会出现偏差——这是基于消息下标做进度追踪的固有局限，
+// 目前没有做逐条消息级别的精确追踪（成本远大于收益，此处如实说明而非掩盖）。
+function onMessageDeleted() {
+    const context = getContext();
+    const data = getChatData();
+    const total = (context.chat || []).length;
+    if (data.lastSummarizedIndex > total) {
+        data.lastSummarizedIndex = total;
+        saveChatData();
+    }
+    renderPanel();
 }
+
+// ------------------------ 导入 / 导出 ------------------------
+
+function exportData() {
+    try {
+        const context = getContext();
+        const data = getChatData();
+        const settings = getSettings();
+        const payload = {
+            schema: 1,
+            moduleName: MODULE_NAME,
+            exportedAt: new Date().toISOString(),
+            chatId: context.chatId ?? null,
+            chatData: {
+                lastSummarizedIndex: data.lastSummarizedIndex,
+                summaries: data.summaries,
+            },
+            settings: structuredClone(settings),
+        };
+        const safeName = String(context.chatId ?? "chat").replace(/[^a-zA-Z0-9_-]+/g, "_");
+        const filename = `memory-summarizer-${safeName}-${Date.now()}.json`;
+        if (downloadJsonFile(filename, payload)) {
+            toastSuccess("已导出记忆数据");
+        }
+    } catch (e) {
+        console.error("[记忆总结助手] 导出失败：", e);
+        toastError(`导出失败：${extractErrorReason(e)}`);
+    }
+}
+
+async function importDataFromFile(file) {
+    const importBtn = document.getElementById("mem-import-btn");
+    if (importBtn) importBtn.disabled = true;
+    try {
+        let text;
+        try {
+            text = await file.text();
+        } catch (e) {
+            toastError(`读取文件失败：${extractErrorReason(e)}`);
+            return;
+        }
+
+        let parsed;
+        try {
+            parsed = JSON.parse(text);
+        } catch (e) {
+            toastError("导入失败：文件不是合法的 JSON");
+            return;
+        }
+        if (!parsed || typeof parsed !== "object") {
+            toastError("导入失败：文件内容格式不正确");
+            return;
+        }
+
+        const rawSummaries = Array.isArray(parsed?.chatData?.summaries) ? parsed.chatData.summaries : [];
+        const validSummaries = rawSummaries.filter((x) => x && typeof x.content === "string" && x.content.trim());
+        const skipped = rawSummaries.length - validSummaries.length;
+        const hasSettings = !!(parsed.settings && typeof parsed.settings === "object");
+
+        if (validSummaries.length === 0 && !hasSettings) {
+            toastError("导入失败：文件中没有可识别的摘要或设置数据");
+            return;
+        }
+
+        const bodyHtml = `
+            <div class="mem-modal-line">来源聊天：${escapeHtml(String(parsed.chatId ?? "未知"))}</div>
+            <div class="mem-modal-line">导出时间：${escapeHtml(String(parsed.exportedAt ?? "未知"))}</div>
+            <div class="mem-modal-line">检测到 <b>${validSummaries.length}</b> 条有效摘要${skipped ? `（另有 ${skipped} 条格式异常，会被跳过）` : ""}</div>
+            <div class="mem-modal-line">${hasSettings ? "检测到插件设置数据" : "未检测到插件设置数据"}</div>
+            <label class="mem-modal-check">
+                <input type="checkbox" id="mem-import-chk-summaries" ${validSummaries.length ? "checked" : "disabled"}/>
+                导入摘要（追加到当前聊天已有摘要之后，不会覆盖/删除现有摘要）
+            </label>
+            <label class="mem-modal-check">
+                <input type="checkbox" id="mem-import-chk-settings" ${hasSettings ? "checked" : "disabled"}/>
+                导入插件设置（会覆盖当前的提示词模板、总结条数等设置，注意导入前请确认）
+            </label>
+        `;
+
+        const result = await showModal({
+            title: "导入记忆数据确认",
+            bodyHtml,
+            confirmText: "确认导入",
+            cancelText: "取消",
+            onConfirm: (bodyEl) => ({
+                importSummaries: !!bodyEl.querySelector("#mem-import-chk-summaries")?.checked,
+                importSettings: !!bodyEl.querySelector("#mem-import-chk-settings")?.checked,
+            }),
+        });
+        if (!result) return; // 用户取消
+
+        let importedCount = 0;
+        if (result.importSummaries && validSummaries.length > 0) {
+            const data = getChatData();
+            const existingIds = new Set(data.summaries.map((x) => x.id));
+            for (const raw of validSummaries) {
+                let id = typeof raw.id === "string" && raw.id ? raw.id : `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+                while (existingIds.has(id)) {
+                    id = `${id}-${Math.random().toString(36).slice(2, 6)}`;
+                }
+                existingIds.add(id);
+                data.summaries.push({
+                    id,
+                    time: typeof raw.time === "string" && raw.time ? raw.time : new Date().toLocaleString(),
+                    range: Array.isArray(raw.range) && raw.range.length === 2 ? raw.range : [0, 0],
+                    content: String(raw.content),
+                    auto: !!raw.auto,
+                });
+                importedCount++;
+            }
+            // 导入摘要不会改动 lastSummarizedIndex，避免打乱当前聊天自己的总结进度。
+            saveChatData();
+        }
+
+        let settingsImported = false;
+        if (result.importSettings && hasSettings) {
+            const s = getSettings();
+            // 只按白名单（defaultSettings 里已有的字段）拷贝，防止导入文件里混入
+            // 未知/多余字段污染设置对象。
+            for (const key of Object.keys(defaultSettings)) {
+                if (parsed.settings[key] !== undefined) {
+                    s[key] = parsed.settings[key];
+                }
+            }
+            saveSettings();
+            syncSettingsToForm();
+            settingsImported = true;
+        }
+
+        updateInjection();
+        renderPanel();
+        toastSuccess(
+            `导入完成：${importedCount ? `新增 ${importedCount} 条摘要` : "未导入摘要"}${settingsImported ? "，已更新插件设置" : ""}`
+        );
+    } finally {
+        if (importBtn) importBtn.disabled = false;
+    }
+}
+
+// 导入设置后，把当前设置值同步回面板上所有输入控件的显示（面板本身只在初始化时渲染一次，
+// 直接改 settings 对象不会自动更新已经在页面上的 input/select 的值，需要手动同步）。
+function syncSettingsToForm() {
+    const s = getSettings();
+    const setVal = (id, val) => {
+        const node = document.getElementById(id);
+        if (node) node.value = val;
+    };
+    const setChecked = (id, val) => {
+        const node = document.getElementById(id);
+        if (node) node.checked = !!val;
+    };
+
+    setVal("mem-count", s.messagesPerSummary);
+    setChecked("mem-auto", s.autoSummarize);
+    setVal("mem-prompt", s.promptTemplate);
+    setChecked("mem-style-ref", s.includeStyleReference);
+    setVal("mem-style-ref-n", s.styleReferenceCount);
+    setChecked("mem-inject", s.autoInject);
+    setVal("mem-inject-pos", s.injectPosition);
+    setVal("mem-inject-depth", s.injectDepth);
+    setVal("mem-inject-role", s.injectRole);
+    setVal("mem-inject-n", s.injectCount);
+    setVal("mem-wi-depth", s.wiDepth);
+    setVal("mem-wi-role", s.wiRole);
+    populateWiPositionSelect();
+    toggleWiAtDepthRow();
+}
+
+// ------------------------ UI 渲染 ------------------------
 
 function buildPanelHtml() {
     const s = getSettings();
@@ -474,18 +909,64 @@ function buildPanelHtml() {
                     </label>
                     <label>合并最近：<input type="number" id="mem-inject-n" min="1" value="${s.injectCount}" style="width:50px"/> 条</label>
                 </div>
+                <div class="mem-hint">
+                    注意：生成新摘要时会临时关闭这里的注入，避免总结这次新内容时把刚注入的旧摘要又重复喂给 AI 一次；
+                    总结完成后会自动恢复，不影响正常聊天。
+                </div>
+
+                <hr/>
+
+                <div class="mem-row">
+                    <label>写入世界书（每条总结下方都有单独按钮，点击后会先预览确认，不会自动写入）：</label>
+                </div>
+                <div class="mem-row mem-inline">
+                    <label>目标世界书：
+                        <select id="mem-wi-book"></select>
+                    </label>
+                    <button id="mem-wi-refresh" class="menu_button mem-btn-icon" title="刷新世界书列表"><i class="fa-solid fa-rotate"></i></button>
+                </div>
+                <div class="mem-row mem-inline">
+                    <label>插入位置：
+                        <select id="mem-wi-position"></select>
+                    </label>
+                </div>
+                <div class="mem-row mem-inline mem-wi-subrow" id="mem-wi-atdepth-row" style="display:none">
+                    <label>深度：<input type="number" id="mem-wi-depth" min="0" value="${s.wiDepth}" style="width:60px"/></label>
+                    <label>角色：
+                        <select id="mem-wi-role">
+                            <option value="system" ${s.wiRole === "system" ? "selected" : ""}>系统</option>
+                            <option value="user" ${s.wiRole === "user" ? "selected" : ""}>用户</option>
+                            <option value="assistant" ${s.wiRole === "assistant" ? "selected" : ""}>AI</option>
+                        </select>
+                    </label>
+                </div>
+                <div class="mem-hint">
+                    完全不想用世界书的话，用下面的"复制全部总结"手动粘贴到你需要的地方即可，不点"写入世界书"就不会有任何自动写入行为。
+                </div>
 
                 <hr/>
 
                 <div class="mem-row mem-inline">
                     <button id="mem-copy-all" class="menu_button"><i class="fa-solid fa-copy"></i> 复制全部总结</button>
-                    <button id="mem-clear-all" class="menu_button danger"><i class="fa-solid fa-trash-can"></i> 清空本聊天全部总结</button>
                 </div>
 
                 <div class="mem-row mem-inline">
-                    <label>写入世界书 - 选择世界书：</label>
-                    <select id="mem-wi-book"></select>
-                    <button id="mem-wi-refresh" class="menu_button mem-btn-icon" title="刷新世界书列表"><i class="fa-solid fa-rotate"></i></button>
+                    <button id="mem-clear-summaries" class="menu_button danger"><i class="fa-solid fa-trash-can"></i> 清空摘要文本</button>
+                    <button id="mem-reset-progress" class="menu_button danger"><i class="fa-solid fa-rotate-left"></i> 重置总结进度</button>
+                </div>
+                <div class="mem-hint">
+                    "清空摘要文本"只删除已保存的摘要内容，总结进度不受影响，这些消息不会重新进入待总结队列；<br/>
+                    "重置总结进度"只重置计数指针，让全部聊天记录重新变为待总结状态（开着自动总结的话可能会连续触发较多新总结、消耗更多 Token），不会影响已保存的摘要文本。
+                </div>
+
+                <div class="mem-row mem-inline">
+                    <button id="mem-export-btn" class="menu_button"><i class="fa-solid fa-file-export"></i> 导出记忆数据</button>
+                    <button id="mem-import-btn" class="menu_button"><i class="fa-solid fa-file-import"></i> 导入记忆数据</button>
+                    <input type="file" id="mem-import-file" accept="application/json" style="display:none" />
+                </div>
+                <div class="mem-hint">
+                    导出会把当前聊天的全部摘要、总结进度和插件设置打包成一个 JSON 文件，方便备份或换设备；
+                    导入时可以分别选择只导入摘要、只导入设置，摘要会追加在当前聊天已有摘要之后，不会覆盖。
                 </div>
 
                 <div id="mem-summary-list" class="mem-summary-list"></div>
@@ -499,17 +980,21 @@ function buildSummaryItemHtml(entry) {
     const badge = entry.auto
         ? '<span class="mem-badge mem-badge-auto">自动</span>'
         : '<span class="mem-badge mem-badge-manual">手动</span>';
+    const charCount = (entry.content || "").length;
     return `
     <div class="mem-summary-item" data-id="${entry.id}">
-        <div class="mem-summary-meta">
-            ${badge}
-            <span>${escapeHtml(entry.time)}（消息 ${entry.range[0] + 1}-${entry.range[1]}）</span>
+        <div class="mem-summary-header">
+            <div class="mem-summary-header-left">
+                ${badge}
+                <span>消息 ${entry.range[0] + 1}-${entry.range[1]} · ${charCount} 字</span>
+            </div>
+            <div class="mem-summary-time" title="真实的总结完成时间">${escapeHtml(entry.time)}</div>
         </div>
         <textarea class="mem-summary-text" data-id="${entry.id}" rows="3">${escapeHtml(entry.content)}</textarea>
         <div class="mem-summary-actions">
-            <button class="menu_button mem-copy-one" data-id="${entry.id}"><i class="fa-solid fa-copy"></i> 复制</button>
             <input type="text" class="mem-wi-keys" data-id="${entry.id}" placeholder="世界书关键词(逗号分隔，留空=常驻)" />
             <button class="menu_button mem-write-wi" data-id="${entry.id}"><i class="fa-solid fa-book"></i> 写入世界书</button>
+            <button class="menu_button mem-copy-one" data-id="${entry.id}"><i class="fa-solid fa-copy"></i> 复制</button>
             <button class="menu_button mem-delete-one danger" data-id="${entry.id}"><i class="fa-solid fa-trash"></i> 删除</button>
         </div>
     </div>
@@ -553,13 +1038,17 @@ function updateStatusLine() {
     const pending = Math.max(0, total - data.lastSummarizedIndex);
     const pct = Math.min(100, Math.round((pending / Math.max(1, s.messagesPerSummary)) * 100));
     const remain = Math.max(0, s.messagesPerSummary - pending);
-    const lastTime = data.summaries.length > 0 ? data.summaries[data.summaries.length - 1].time : "尚未总结过";
+    const lastEntry = data.summaries.length > 0 ? data.summaries[data.summaries.length - 1] : null;
+    const lastTime = lastEntry ? lastEntry.time : "尚未总结过";
+    const totalChars = data.summaries.reduce((sum, x) => sum + (x.content ? x.content.length : 0), 0);
     const autoNote = s.autoSummarize ? "" : "（自动总结当前已关闭）";
 
     statusDiv.innerHTML = `
         <div class="mem-status-line">
-            <span>共 <b>${total}</b> 条消息 / 已有 <b>${data.summaries.length}</b> 条摘要</span>
-            <span>上次总结：${escapeHtml(lastTime)}</span>
+            <span>共 <b>${total}</b> 条消息 · 已有 <b>${data.summaries.length}</b> 条摘要 · 共 <b>${totalChars}</b> 字</span>
+        </div>
+        <div class="mem-status-line mem-status-sub">
+            <span>上次更新：${escapeHtml(lastTime)}</span>
         </div>
         <div class="mem-progress" title="距离自动总结还差 ${remain} 条">
             <div class="mem-progress-bar" style="width:${pct}%"></div>
@@ -647,6 +1136,20 @@ function bindPanelEvents() {
         updateInjection();
     });
 
+    document.getElementById("mem-wi-position").addEventListener("change", (e) => {
+        s.wiPosition = e.target.value;
+        saveSettings();
+        toggleWiAtDepthRow();
+    });
+    document.getElementById("mem-wi-depth").addEventListener("change", (e) => {
+        s.wiDepth = Math.max(0, parseInt(e.target.value) || 0);
+        saveSettings();
+    });
+    document.getElementById("mem-wi-role").addEventListener("change", (e) => {
+        s.wiRole = e.target.value;
+        saveSettings();
+    });
+
     document.getElementById("mem-copy-all").addEventListener("click", () => {
         const data = getChatData();
         const text = data.summaries.map((x) => x.content).join("\n\n");
@@ -657,18 +1160,68 @@ function bindPanelEvents() {
         copyToClipboard(text, "已复制全部总结");
     });
 
-    document.getElementById("mem-clear-all").addEventListener("click", () => {
-        if (!confirm("确定要清空当前聊天的全部总结记录吗？（对话计数也会重置）")) return;
+    document.getElementById("mem-clear-summaries").addEventListener("click", async () => {
         const data = getChatData();
+        if (data.summaries.length === 0) {
+            toastInfo("当前没有可清空的摘要");
+            return;
+        }
+        const confirmed = await showModal({
+            title: "清空摘要文本",
+            bodyHtml: `
+                <div class="mem-modal-line">确定要清空当前聊天已保存的全部 ${data.summaries.length} 条摘要文本吗？</div>
+                <div class="mem-modal-line">总结进度不会被重置，这些消息不会重新计入"待总结"队列，也不会被自动重新总结。</div>
+                <div class="mem-modal-line">此操作不可撤销。</div>
+            `,
+            confirmText: "确认清空",
+            cancelText: "取消",
+            danger: true,
+        });
+        if (!confirmed) return;
         data.summaries = [];
+        saveChatData();
+        updateInjection();
+        renderPanel();
+        toastSuccess("已清空当前聊天的全部摘要文本");
+    });
+
+    document.getElementById("mem-reset-progress").addEventListener("click", async () => {
+        const confirmed = await showModal({
+            title: "重置总结进度",
+            bodyHtml: `
+                <div class="mem-modal-line">确定要重置总结进度吗？</div>
+                <div class="mem-modal-line">重置后，全部聊天记录会重新计为"待总结"状态；如果开着自动总结，接下来可能会连续触发多次总结请求，消耗较多 Token。</div>
+                <div class="mem-modal-line">已保存的摘要文本不会被清空或修改。</div>
+            `,
+            confirmText: "确认重置",
+            cancelText: "取消",
+            danger: true,
+        });
+        if (!confirmed) return;
+        const data = getChatData();
         data.lastSummarizedIndex = 0;
         saveChatData();
         renderPanel();
-        toastSuccess("已清空当前聊天的全部总结记录");
+        toastSuccess("已重置总结进度");
+    });
+
+    document.getElementById("mem-export-btn").addEventListener("click", () => {
+        exportData();
+    });
+    document.getElementById("mem-import-btn").addEventListener("click", () => {
+        document.getElementById("mem-import-file")?.click();
+    });
+    document.getElementById("mem-import-file").addEventListener("change", async (e) => {
+        const file = e.target.files?.[0];
+        e.target.value = ""; // 重置一下，保证再次选同一个文件也能触发 change
+        if (!file) return;
+        await importDataFromFile(file);
     });
 
     document.getElementById("mem-wi-refresh").addEventListener("click", () => {
         populateWorldBookSelect();
+        populateWiPositionSelect();
+        toggleWiAtDepthRow();
         toastInfo("世界书列表已刷新");
     });
 
@@ -683,6 +1236,8 @@ function bindPanelEvents() {
     }
 
     populateWorldBookSelect();
+    populateWiPositionSelect();
+    toggleWiAtDepthRow();
 
     // 事件委托：总结列表里的按钮（列表会被重新渲染，所以在父容器上监听）
     const list = document.getElementById("mem-summary-list");
@@ -697,24 +1252,15 @@ function bindPanelEvents() {
         if (target.classList.contains("mem-copy-one")) {
             copyToClipboard(data.summaries[entryIndex].content, "已复制该条总结");
         } else if (target.classList.contains("mem-delete-one")) {
-            if (!confirm("删除这条总结？")) return;
+            // 删除只移除这条摘要文本，不会让对应的消息重新变回"待总结"状态
+            // （lastSummarizedIndex 不受影响），避免同一段对话被重复总结、重复消耗 Token。
+            if (!confirm('删除这条总结？删除后不可恢复，对应的消息也不会重新变为"待总结"状态。')) return;
             data.summaries.splice(entryIndex, 1);
             saveChatData();
+            updateInjection();
             renderPanel();
         } else if (target.classList.contains("mem-write-wi")) {
-            const bookSelect = document.getElementById("mem-wi-book");
-            const bookName = bookSelect?.value;
-            if (!bookName) {
-                toastError("请先选择一个世界书");
-                return;
-            }
-            const keysInput = list.querySelector(`.mem-wi-keys[data-id="${id}"]`);
-            target.disabled = true;
-            try {
-                await writeToWorldInfo(bookName, data.summaries[entryIndex].content, keysInput?.value);
-            } finally {
-                target.disabled = false;
-            }
+            await openWiWritePreview(data.summaries[entryIndex], target);
         }
     });
 
@@ -727,26 +1273,36 @@ function bindPanelEvents() {
         if (entry) {
             entry.content = target.value;
             saveChatData();
+            updateInjection();
         }
     });
 }
 
 // ------------------------ 初始化 ------------------------
+// 用一个全局标记防止模块被重复执行时重复绑定事件监听（比如某些环境下的热重载场景），
+// 避免出现"同一条消息触发两次自动总结"这类由重复监听导致的问题。
+if (window.__memSummarizerLoaded) {
+    console.warn("[记忆总结助手] 检测到扩展被重复加载，已跳过本次初始化以避免重复绑定事件监听");
+} else {
+    window.__memSummarizerLoaded = true;
 
-jQuery(async () => {
-    const settingsHtml = buildPanelHtml();
-    $("#extensions_settings2").append(settingsHtml);
+    jQuery(async () => {
+        const settingsHtml = buildPanelHtml();
+        $("#extensions_settings2").append(settingsHtml);
 
-    bindPanelEvents();
-    renderPanel();
-
-    // 监听消息事件，自动计数/自动总结
-    eventSource.on(event_types.MESSAGE_RECEIVED, onChatEvent);
-    eventSource.on(event_types.MESSAGE_SENT, onChatEvent);
-    eventSource.on(event_types.CHAT_CHANGED, () => {
+        bindPanelEvents();
         renderPanel();
         updateInjection();
-    });
 
-    console.log("[记忆总结助手] 插件已加载 v1.1.0");
-});
+        // 监听消息事件，自动计数/自动总结
+        eventSource.on(event_types.MESSAGE_RECEIVED, onChatEvent);
+        eventSource.on(event_types.MESSAGE_SENT, onChatEvent);
+        eventSource.on(event_types.MESSAGE_DELETED, onMessageDeleted);
+        eventSource.on(event_types.CHAT_CHANGED, () => {
+            renderPanel();
+            updateInjection();
+        });
+
+        console.log("[记忆总结助手] 插件已加载 v1.2.0");
+    });
+}
