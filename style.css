@@ -1,6 +1,56 @@
+/* ============================================================
+ * 记忆总结助手 Memory Summarizer — 面板样式  v1.0.0
+ （个人使用，非明确要求，不增长版本号、不记录更新内容）
+============================================================ */
+
+:root {
+    --mem-accent-1: #7c6ff0;
+    --mem-accent-2: #4a90d9;
+    --mem-accent-gold: #d4a030;
+    --mem-accent-gold-2: #e8c468;
+    --mem-radius-lg: 16px;
+    --mem-radius-md: 12px;
+    --mem-radius-sm: 8px;
+    --mem-glass-bg: rgba(255, 255, 255, 0.045);
+    --mem-glass-bg-strong: rgba(255, 255, 255, 0.07);
+    --mem-glass-border: rgba(255, 255, 255, 0.1);
+    --mem-shadow-soft: 0 4px 18px rgba(0, 0, 0, 0.22);
+    --mem-shadow-strong: 0 12px 34px rgba(0, 0, 0, 0.4);
+}
+
 .mem-summarizer-panel {
     margin-top: 6px;
 }
+
+/* ------------------------ 头部：渐变标题 ------------------------ */
+
+.mem-summarizer-panel .inline-drawer-toggle.mem-header {
+    display: flex;
+    align-items: center;
+    gap: 0;
+}
+
+.mem-header-title-wrap {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+}
+
+.mem-header-icon {
+    font-size: 1.05em;
+    filter: drop-shadow(0 0 6px rgba(124, 111, 240, 0.35));
+}
+
+.mem-header-title {
+    background: linear-gradient(135deg, var(--mem-accent-1), var(--mem-accent-2) 80%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    font-weight: 700;
+    letter-spacing: 0.2px;
+}
+
+/* ------------------------ 通用行/控件（沿用原有约定） ------------------------ */
 
 .mem-summarizer-panel .mem-row {
     margin: 8px 0;
@@ -21,6 +71,18 @@
     resize: vertical;
     font-size: 0.9em;
     box-sizing: border-box;
+    background: var(--SmartThemeBlurTintColor, #222);
+    color: inherit;
+    border: 1px solid var(--SmartThemeBorderColor, #555);
+    border-radius: var(--mem-radius-sm);
+    padding: 6px 8px;
+    transition: border-color 0.2s ease;
+}
+.mem-summarizer-panel textarea:focus-visible,
+.mem-summarizer-panel select:focus-visible,
+.mem-summarizer-panel input:focus-visible {
+    outline: 2px solid var(--mem-accent-2);
+    outline-offset: 1px;
 }
 
 .mem-summarizer-panel select,
@@ -29,8 +91,8 @@
     background: var(--SmartThemeBlurTintColor, #222);
     color: inherit;
     border: 1px solid var(--SmartThemeBorderColor, #555);
-    border-radius: 4px;
-    padding: 4px 6px;
+    border-radius: var(--mem-radius-sm);
+    padding: 4px 8px;
     min-height: 30px;
     box-sizing: border-box;
 }
@@ -48,21 +110,29 @@
     align-items: center;
     gap: 4px;
     white-space: nowrap;
+    border-radius: var(--mem-radius-sm);
+    transition: transform 0.12s ease, filter 0.15s ease, background 0.15s ease;
+}
+.mem-summarizer-panel .menu_button:active:not(:disabled) {
+    transform: scale(0.97);
 }
 
-/* 主按钮：立即总结 —— 视觉上突出，方便手机上一眼找到 */
-.mem-summarizer-panel .mem-btn-primary {
-    background: var(--SmartThemeQuoteColor, #4a90d9);
+/* 主按钮：立即总结按钮在 .mem-summarizer-panel 里，showModal 的"确认"按钮
+   是挂在 document.body 下的独立弹窗（不在 .mem-summarizer-panel 子树内），
+   两个作用域都要覆盖到，写法上和下面 .danger 的双作用域保持一致。 */
+.mem-summarizer-panel .mem-btn-primary,
+.mem-modal .mem-btn-primary {
+    background: linear-gradient(135deg, var(--mem-accent-1), var(--mem-accent-2));
     border-color: transparent;
     color: #fff;
     font-weight: 600;
-    justify-content: center;
-    width: 100%;
 }
-.mem-summarizer-panel .mem-btn-primary:hover:not(:disabled) {
+.mem-summarizer-panel .mem-btn-primary:hover:not(:disabled),
+.mem-modal .mem-btn-primary:hover:not(:disabled) {
     filter: brightness(1.1);
 }
-.mem-summarizer-panel .mem-btn-primary:disabled {
+.mem-summarizer-panel .mem-btn-primary:disabled,
+.mem-modal .mem-btn-primary:disabled {
     opacity: 0.65;
     cursor: not-allowed;
 }
@@ -117,8 +187,307 @@
 
 .mem-progress-bar {
     height: 100%;
-    background: var(--SmartThemeQuoteColor, #4a90d9);
+    background: linear-gradient(90deg, var(--mem-accent-1), var(--mem-accent-2));
     transition: width 0.3s ease;
+}
+
+/* ============================================================
+ * 基础模式卡片：毛玻璃 + 圆角 + 阴影，始终可见的 4 项常用控件
+ * ============================================================ */
+
+.mem-card {
+    border-radius: var(--mem-radius-lg);
+    box-shadow: var(--mem-shadow-soft);
+}
+
+.mem-card-basic {
+    margin-top: 10px;
+    padding: 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    background: var(--mem-glass-bg);
+    border: 1px solid var(--mem-glass-border);
+    backdrop-filter: blur(14px) saturate(160%);
+    -webkit-backdrop-filter: blur(14px) saturate(160%);
+}
+
+.mem-basic-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 10px 16px;
+}
+
+/* 开关样式的"自动总结"，比裸 checkbox 更好点 */
+.mem-switch-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 9px;
+    cursor: pointer;
+    font-weight: 600;
+}
+.mem-switch {
+    position: relative;
+    display: inline-block;
+    width: 38px;
+    height: 22px;
+    flex-shrink: 0;
+}
+.mem-switch input {
+    position: absolute;
+    inset: 0;
+    opacity: 0;
+    margin: 0;
+    cursor: pointer;
+    z-index: 2;
+}
+.mem-switch-track {
+    position: absolute;
+    inset: 0;
+    background: rgba(128, 128, 128, 0.38);
+    border-radius: 999px;
+    transition: background 0.25s ease;
+}
+.mem-switch-thumb {
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: #fff;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.45);
+    transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.mem-switch input:checked ~ .mem-switch-track {
+    background: linear-gradient(135deg, var(--mem-accent-1), var(--mem-accent-2));
+}
+.mem-switch input:checked ~ .mem-switch-track .mem-switch-thumb {
+    transform: translateX(16px);
+}
+.mem-switch input:focus-visible ~ .mem-switch-track {
+    outline: 2px solid var(--mem-accent-2);
+    outline-offset: 2px;
+}
+
+.mem-basic-count {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 0.92em;
+    opacity: 0.9;
+    white-space: nowrap;
+}
+.mem-basic-count input {
+    width: 54px;
+    text-align: center;
+    font-weight: 600;
+}
+
+/* 立即总结：全宽渐变按钮
+   （用 .mem-summarizer-panel 前缀把选择器提到和上面 .menu_button 规则同一个
+   特异度，且这条规则在文件里出现得更晚，才能稳定盖掉 .menu_button 的默认
+   padding / border-radius，否则按钮会缩回普通按钮的大小。） */
+.mem-summarizer-panel .mem-btn-run {
+    width: 100%;
+    justify-content: center;
+    padding: 11px 16px;
+    font-size: 0.98em;
+    border-radius: var(--mem-radius-md);
+    box-shadow: 0 6px 18px rgba(124, 111, 240, 0.35);
+}
+.mem-summarizer-panel .mem-btn-run:hover:not(:disabled) {
+    box-shadow: 0 8px 22px rgba(124, 111, 240, 0.45);
+}
+.mem-summarizer-panel .mem-btn-run.mem-btn-loading {
+    box-shadow: none;
+}
+
+.mem-basic-stats {
+    text-align: center;
+    font-size: 0.82em;
+    opacity: 0.8;
+}
+.mem-basic-stats b {
+    color: var(--mem-accent-2);
+    font-weight: 700;
+}
+
+/* "AI 正在生成摘要…" 模拟状态条：跳动圆点 + 呼吸光带 */
+.mem-typing-indicator {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 10px;
+    border-radius: var(--mem-radius-sm);
+    background: rgba(124, 111, 240, 0.08);
+    border: 1px solid rgba(124, 111, 240, 0.18);
+}
+.mem-typing-indicator[hidden] {
+    display: none;
+}
+.mem-typing-dots {
+    display: inline-flex;
+    gap: 4px;
+    flex-shrink: 0;
+}
+.mem-typing-dots span {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, var(--mem-accent-1), var(--mem-accent-2));
+    animation: mem-typing-bounce 1.2s ease-in-out infinite;
+}
+.mem-typing-dots span:nth-child(2) { animation-delay: 0.15s; }
+.mem-typing-dots span:nth-child(3) { animation-delay: 0.3s; }
+@keyframes mem-typing-bounce {
+    0%, 60%, 100% { transform: translateY(0); opacity: 0.5; }
+    30% { transform: translateY(-4px); opacity: 1; }
+}
+.mem-typing-shimmer {
+    flex: 1;
+    height: 8px;
+    min-width: 30px;
+    border-radius: 4px;
+    background: linear-gradient(90deg, rgba(124, 111, 240, 0.15) 25%, rgba(124, 111, 240, 0.45) 37%, rgba(124, 111, 240, 0.15) 63%);
+    background-size: 400% 100%;
+    animation: mem-shimmer 1.4s ease infinite;
+}
+@keyframes mem-shimmer {
+    0% { background-position: 100% 50%; }
+    100% { background-position: 0 50%; }
+}
+.mem-typing-text {
+    font-size: 0.78em;
+    opacity: 0.75;
+    white-space: nowrap;
+}
+
+/* ============================================================
+ * 折叠分组（总结设置 / 注入设置 / 世界书 / 长期记忆）
+ * ============================================================ */
+
+.mem-section {
+    margin-top: 10px;
+    border-radius: var(--mem-radius-md);
+    overflow: hidden;
+    background: rgba(255, 255, 255, 0.025);
+    border: 1px solid rgba(255, 255, 255, 0.07);
+}
+
+.mem-section-toggle {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    padding: 11px 12px;
+    background: transparent;
+    border: none;
+    color: inherit;
+    font: inherit;
+    font-size: 0.93em;
+    font-weight: 600;
+    cursor: pointer;
+    text-align: left;
+}
+.mem-section-toggle:hover {
+    background: rgba(255, 255, 255, 0.035);
+}
+.mem-section-toggle:focus-visible {
+    outline: 2px solid var(--mem-accent-2);
+    outline-offset: -2px;
+}
+
+.mem-section-chevron {
+    font-size: 0.75em;
+    opacity: 0.6;
+    transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    flex-shrink: 0;
+}
+.mem-section-toggle.open .mem-section-chevron {
+    transform: rotate(90deg);
+}
+
+.mem-section-icon {
+    opacity: 0.9;
+    color: var(--mem-accent-2);
+    width: 1em;
+    text-align: center;
+    flex-shrink: 0;
+}
+
+.mem-section-label {
+    flex: 1;
+}
+
+.mem-section-count {
+    font-size: 0.85em;
+    font-weight: 700;
+    color: var(--mem-accent-2);
+    background: rgba(74, 144, 217, 0.15);
+    border-radius: 999px;
+    padding: 1px 8px;
+    min-width: 20px;
+    text-align: center;
+}
+
+/* 平滑展开/收起：grid-template-rows 0fr -> 1fr，纯 CSS，无需 JS 量高度 */
+.mem-collapse {
+    display: grid;
+    grid-template-rows: 0fr;
+    transition: grid-template-rows 0.32s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.mem-collapse.open {
+    grid-template-rows: 1fr;
+}
+.mem-collapse > .mem-collapse-inner {
+    overflow: hidden;
+    min-height: 0;
+}
+.mem-collapse-pad {
+    padding: 2px 12px 14px;
+    border-top: 1px solid rgba(255, 255, 255, 0.06);
+    margin-top: 2px;
+    padding-top: 12px;
+}
+
+/* ============================================================
+ * 记忆分类样式卡：长期记忆（蓝色系） / 核心记忆（金色系）
+ * ============================================================ */
+
+.mem-subsection {
+    border-radius: var(--mem-radius-md);
+    padding: 12px;
+    margin-bottom: 12px;
+}
+.mem-subsection:last-child {
+    margin-bottom: 0;
+}
+.mem-subsection-title {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    font-weight: 700;
+    font-size: 0.92em;
+    margin-bottom: 8px;
+}
+
+.mem-subsection-core {
+    background: linear-gradient(160deg, rgba(212, 160, 48, 0.1), rgba(212, 160, 48, 0.025));
+    border: 1px solid rgba(212, 160, 48, 0.24);
+}
+.mem-subsection-core .mem-subsection-title {
+    color: var(--mem-accent-gold);
+}
+
+.mem-subsection-longterm {
+    background: linear-gradient(160deg, rgba(74, 144, 217, 0.1), rgba(74, 144, 217, 0.025));
+    border: 1px solid rgba(74, 144, 217, 0.22);
+}
+.mem-subsection-longterm .mem-subsection-title {
+    color: var(--mem-accent-2);
 }
 
 .mem-summary-list {
@@ -134,14 +503,37 @@
     opacity: 0.6;
     font-size: 0.9em;
     border: 1px dashed var(--SmartThemeBorderColor, #555);
-    border-radius: 8px;
+    border-radius: var(--mem-radius-sm);
 }
 
+/* 单条摘要/核心记忆卡片：不叠加 backdrop-filter（性能原因，见文件头说明），
+   用左侧色条 + 淡色背景区分"长期记忆"和"核心记忆"两类。 */
 .mem-summary-item {
+    position: relative;
     border: 1px solid var(--SmartThemeBorderColor, #555);
-    border-radius: 8px;
-    padding: 10px;
-    background: rgba(255, 255, 255, 0.03);
+    border-left: 3px solid var(--mem-accent-2);
+    border-radius: var(--mem-radius-sm);
+    padding: 10px 10px 10px 12px;
+    background: rgba(74, 144, 217, 0.045);
+    box-shadow: var(--mem-shadow-soft);
+    transition: box-shadow 0.2s ease, transform 0.2s ease;
+}
+.mem-summary-item:hover {
+    box-shadow: 0 6px 22px rgba(0, 0, 0, 0.28);
+}
+
+.mem-core-item {
+    border-left-color: var(--mem-accent-gold);
+    background: rgba(212, 160, 48, 0.06);
+}
+
+/* 新增条目的一次性入场动画 */
+@keyframes mem-item-enter {
+    from { opacity: 0; transform: translateY(-8px) scale(0.98); }
+    to { opacity: 1; transform: translateY(0) scale(1); }
+}
+.mem-item-new {
+    animation: mem-item-enter 0.45s cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 
 /* 条目头部：左边徽章+范围/字数，右上角显示真实的总结完成时间 */
@@ -171,20 +563,26 @@
 }
 
 .mem-badge {
-    display: inline-block;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
     font-size: 0.85em;
-    padding: 1px 7px;
+    padding: 1px 8px;
     border-radius: 10px;
     font-weight: 600;
     line-height: 1.6;
 }
 .mem-badge-auto {
     background: rgba(74, 144, 217, 0.18);
-    color: #4a90d9;
+    color: #6fb0ec;
 }
 .mem-badge-manual {
     background: rgba(140, 140, 140, 0.2);
     color: #999;
+}
+.mem-badge-core {
+    background: rgba(220, 160, 50, 0.22);
+    color: var(--mem-accent-gold-2);
 }
 
 .mem-summary-actions {
@@ -200,6 +598,39 @@
     min-width: 140px;
 }
 
+.mem-btn-core {
+    background: rgba(220, 160, 50, 0.15);
+    border-color: rgba(220, 160, 50, 0.4);
+    color: var(--mem-accent-gold-2);
+    font-weight: 600;
+}
+.mem-btn-core:hover:not(:disabled) {
+    background: rgba(220, 160, 50, 0.25);
+}
+.mem-btn-core:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
+.mem-select-for-core {
+    width: 16px;
+    height: 16px;
+    cursor: pointer;
+    flex-shrink: 0;
+}
+
+#mem-summary-pagination {
+    margin-top: 8px;
+    margin-bottom: 4px;
+}
+#mem-summary-pagination .menu_button {
+    font-size: 0.85em;
+    opacity: 0.8;
+}
+#mem-summary-pagination .menu_button:hover {
+    opacity: 1;
+}
+
 /* ------------------------ 通用确认/预览弹窗 ------------------------ */
 
 .mem-modal-overlay {
@@ -211,24 +642,41 @@
     justify-content: center;
     z-index: 9999;
     padding: 16px;
+    animation: mem-fade-in 0.18s ease;
+}
+@keyframes mem-fade-in {
+    from { opacity: 0; }
+    to { opacity: 1; }
 }
 
 .mem-modal {
     background: var(--SmartThemeBlurTintColor, #1e1e1e);
-    border: 1px solid var(--SmartThemeBorderColor, #555);
-    border-radius: 10px;
+    border: 1px solid var(--mem-glass-border);
+    border-radius: var(--mem-radius-lg);
     padding: 16px;
     max-width: 480px;
     width: 100%;
     max-height: 85vh;
     overflow-y: auto;
-    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
+    box-shadow: var(--mem-shadow-strong);
+    backdrop-filter: blur(18px) saturate(160%);
+    -webkit-backdrop-filter: blur(18px) saturate(160%);
+    animation: mem-modal-pop 0.22s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+@keyframes mem-modal-pop {
+    from { opacity: 0; transform: translateY(8px) scale(0.98); }
+    to { opacity: 1; transform: translateY(0) scale(1); }
 }
 
 .mem-modal-title {
-    font-weight: 600;
+    font-weight: 700;
     font-size: 1.05em;
     margin-bottom: 10px;
+    background: linear-gradient(135deg, var(--mem-accent-1), var(--mem-accent-2) 80%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    display: inline-block;
 }
 
 .mem-modal-body {
@@ -263,8 +711,13 @@
     background: var(--SmartThemeBotMesBlurTintColor, rgba(128, 128, 128, 0.08));
     color: inherit;
     border: 1px solid var(--SmartThemeBorderColor, #555);
-    border-radius: 6px;
+    border-radius: var(--mem-radius-sm);
     padding: 6px 8px;
+    font-family: inherit;
+}
+.mem-preview-textarea:focus-visible {
+    outline: 2px solid var(--mem-accent-2);
+    outline-offset: 1px;
 }
 
 .mem-modal-actions {
@@ -274,7 +727,12 @@
     margin-top: 14px;
 }
 
-@media (max-width: 420px) {
+/* ------------------------ 响应式 / 手机端 ------------------------ */
+
+@media (max-width: 480px) {
+    .mem-card-basic {
+        padding: 12px;
+    }
     .mem-summarizer-panel .mem-inline {
         gap: 8px 14px;
     }
@@ -287,58 +745,82 @@
     .mem-summary-time {
         margin-left: 0;
     }
+    .mem-section-toggle {
+        padding: 10px;
+        font-size: 0.9em;
+    }
+    .mem-typing-text {
+        display: none;
+    }
 }
 
-/* ==================== 核心记忆 & 分页 新增样式 ==================== */
+/* ============================================================
+ 筛选栏 / 排序按钮 / 拖拽排序 / 手动添加
+ * ============================================================ */
 
-.mem-section-title {
-    font-weight: 600;
-    font-size: 0.95em;
-    margin: 6px 0 4px;
-    display: flex;
+.mem-filter-bar {
+    padding: 8px 0;
+    gap: 8px 12px;
+}
+.mem-filter-bar label {
+    display: inline-flex;
     align-items: center;
-    gap: 6px;
-}
-
-.mem-badge-core {
-    background: rgba(220, 160, 50, 0.22);
-    color: #d4a030;
-}
-
-.mem-core-item {
-    border-color: rgba(220, 160, 50, 0.35);
-}
-
-.mem-btn-core {
-    background: rgba(220, 160, 50, 0.15);
-    border-color: rgba(220, 160, 50, 0.4);
-    color: #d4a030;
-    font-weight: 600;
-}
-.mem-btn-core:hover:not(:disabled) {
-    background: rgba(220, 160, 50, 0.25);
-}
-.mem-btn-core:disabled {
-    opacity: 0.6;
-    cursor: not-allowed;
-}
-
-.mem-select-for-core {
-    width: 16px;
-    height: 16px;
-    cursor: pointer;
-    flex-shrink: 0;
-}
-
-#mem-summary-pagination {
-    margin-top: 8px;
-    margin-bottom: 4px;
-}
-
-#mem-summary-pagination .menu_button {
+    gap: 4px;
     font-size: 0.85em;
-    opacity: 0.8;
+    white-space: nowrap;
 }
-#mem-summary-pagination .menu_button:hover {
-    opacity: 1;
+.mem-filter-bar select,
+.mem-filter-bar input[type="number"] {
+    min-height: 28px;
+    font-size: 0.88em;
+}
+
+#mem-order-toggle span {
+    font-size: 0.85em;
+}
+
+/* 手动添加记忆区域 */
+#mem-manual-add-text {
+    min-height: 60px;
+}
+
+/* 拖拽时的占位符 */
+.mem-drag-placeholder {
+    border: 2px dashed var(--mem-accent-2);
+    border-radius: var(--mem-radius-sm);
+    background: rgba(74, 144, 217, 0.08);
+    transition: height 0.15s ease;
+    box-sizing: border-box;
+}
+
+/* 被拖动的条目 */
+.mem-summary-item.mem-dragging {
+    opacity: 0.92;
+    box-shadow: 0 12px 36px rgba(0, 0, 0, 0.45);
+    border-color: var(--mem-accent-2);
+    cursor: grabbing;
+    user-select: none;
+    -webkit-user-select: none;
+}
+
+/* 拖拽期间列表内的条目加一个微弱的过渡，让占位符移动时视觉更平滑 */
+.mem-summary-list .mem-summary-item {
+    transition: transform 0.15s ease;
+}
+
+/* ------------------------ 无障碍：尊重"减少动态效果" ------------------------ */
+
+@media (prefers-reduced-motion: reduce) {
+    .mem-summarizer-panel *,
+    .mem-modal-overlay,
+    .mem-modal {
+        animation: none !important;
+        transition: none !important;
+    }
+    .mem-collapse {
+        grid-template-rows: 0fr;
+    }
+    .mem-collapse.open {
+        grid-template-rows: 1fr;
+    }
 }
