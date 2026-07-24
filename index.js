@@ -47,6 +47,17 @@ let lastAddedCoreId = null;
 // 用户体验会很差（勾了几条，切一下筛选条件，勾选全没了）。
 let selectedForCoreIds = new Set();
 
+// 运行时状态（纯 UI，不持久化）：长期记忆 / 核心记忆的搜索关键词。
+// 特意不放进 extension_settings 里：saveSettings() 实际调用的是酒馆全局的
+// saveSettingsDebounced()，它保存的是整个 extension_settings 对象，不是只保存
+// "这一个字段"——如果搜索词存在 settings 里，只要之后任何一次别的设置变更
+// （哪怕跟搜索毫无关系）顺带触发了一次保存，输入框里当时残留的搜索词就会被
+// 一起写进磁盘上的配置文件，还会被"导出记忆数据"打包进 JSON、被"导入"覆盖回来，
+// 造成困惑（比如导入别人分享的存档后，搜索框明明是空的，列表却莫名其妙被过滤了）。
+// 用普通模块级变量，和 summaryShowAll/coreShowAll/selectedForCoreIds 保持一致。
+let searchKeyword = "";
+let coreSearchKeyword = "";
+
 // ------------------------ 默认配置 ------------------------
 const defaultSettings = {
     messagesPerSummary: 20,          // 每次总结发送的对话条数
@@ -98,6 +109,10 @@ const defaultSettings = {
     coreFilterTimeRange: "all",
     corePageSize: 20,
 
+    // 数据量软限制：超过阈值时在面板里显示提醒，不会自动删除
+    summaryWarnThreshold: 200,        // 长期记忆条数警告阈值，0=不提醒
+    coreWarnThreshold: 50,            // 核心记忆条数警告阈值，0=不提醒
+
     // 自定义注入提示词模板：核心记忆 / 长期记忆各一份，无论是"自动注入到上下文"还是
     // "写入世界书"，都统一用这份模板包裹——同一类记忆永远只被同一份模板包一次，
     // 且会先把该类全部记忆合并成一整块（每条一行），再整体套进模板里，不会逐条分散注入。
@@ -122,9 +137,50 @@ function getChatData() {
             lastSummarizedIndex: 0,
             summaries: [], // { id, time, range: [start,end], content, auto }
             coreMemories: [], // { id, time, content, sourceIds: [] }
+            trashBin: [], // { deletedAt, type: "summary"|"core", entry: 原始条目 }
         };
     }
+    if (!context.chatMetadata[MODULE_NAME].trashBin) {
+        context.chatMetadata[MODULE_NAME].trashBin = [];
+    }
     return context.chatMetadata[MODULE_NAME];
+}
+
+// 回收站常量
+const TRASH_MAX_COUNT = 10;      // 回收站最多保留条数
+const TRASH_EXPIRE_MS = 86400000; // 24 小时（毫秒）
+
+// 把一条被删除的记忆移入回收站（不做 saveChatData，由调用方统一保存）
+function moveToTrash(entry, type) {
+    const data = getChatData();
+    // 先清理过期条目
+    const now = Date.now();
+    data.trashBin = data.trashBin.filter((t) => (now - t.deletedAt) < TRASH_EXPIRE_MS);
+    // 加入新条目
+    data.trashBin.push({
+        deletedAt: now,
+        type: type, // "summary" 或 "core"
+        entry: structuredClone(entry),
+    });
+    // 超出上限就删最旧的
+    while (data.trashBin.length > TRASH_MAX_COUNT) {
+        data.trashBin.shift();
+    }
+}
+
+// 获取回收站中尚未过期的条目
+function getValidTrashItems() {
+    const data = getChatData();
+    const now = Date.now();
+    return data.trashBin.filter((t) => (now - t.deletedAt) < TRASH_EXPIRE_MS);
+}
+
+// 更新"回收站"按钮上的数量小标，让用户不用点开就知道里面有没有东西
+function updateTrashCount() {
+    const el = document.getElementById("mem-trash-count");
+    if (!el) return;
+    const count = getValidTrashItems().length;
+    el.textContent = count > 0 ? ` (${count})` : "";
 }
 
 function saveChatData() {
@@ -223,6 +279,18 @@ function formatMessagesForPrompt(messages) {
         .filter((m) => !m.is_system && stripHtml(m.mes))
         .map((m) => `${m.name || (m.is_user ? "User" : "AI")}: ${stripHtml(m.mes)}`)
         .join("\n");
+}
+
+// 简单防抖：搜索框这类"输入即触发重渲染"的场景专用。
+// 长期记忆/核心记忆列表多起来之后，每敲一个字就整表重新生成一次 innerHTML 会有明显卡顿，
+// 等用户停下来（默认 200ms）再渲染一次，观感上仍然是"实时搜索"，但省掉了打字过程中间那些
+// 立刻被下一次按键覆盖掉、白白重渲染的中间态。
+function debounce(fn, wait = 200) {
+    let timer = null;
+    return (...args) => {
+        if (timer) clearTimeout(timer);
+        timer = setTimeout(() => fn(...args), wait);
+    };
 }
 
 function copyToClipboard(text, successMsg = "已复制到剪贴板") {
@@ -1148,6 +1216,8 @@ function syncSettingsToForm() {
     setVal("mem-prompt", s.promptTemplate);
     setChecked("mem-style-ref", s.includeStyleReference);
     setVal("mem-style-ref-n", s.styleReferenceCount);
+    setVal("mem-summary-warn-threshold", s.summaryWarnThreshold);
+    setVal("mem-core-warn-threshold", s.coreWarnThreshold);
     setChecked("mem-inject", s.autoInject);
     setVal("mem-inject-pos", s.injectPosition);
     setVal("mem-inject-depth", s.injectDepth);
@@ -1226,6 +1296,13 @@ function buildPanelHtml() {
         <div class="mem-hint">
             开启后，每次生成新摘要都会把最近几条旧摘要一起发给 AI，并明确告诉它"这些仅供参考、不需要重新总结"，
             目的是让所有摘要保持统一的写作风格和语气；旧摘要本身不会被修改，新摘要始终追加在后面。
+        </div>
+        <div class="mem-row mem-inline">
+            <label>长期记忆条数警告阈值：<input type="number" id="mem-summary-warn-threshold" min="0" value="${s.summaryWarnThreshold}" style="width:60px" placeholder="0=不提醒"/></label>
+            <label>核心记忆条数警告阈值：<input type="number" id="mem-core-warn-threshold" min="0" value="${s.coreWarnThreshold}" style="width:60px" placeholder="0=不提醒"/></label>
+        </div>
+        <div class="mem-hint">
+            条数达到阈值后会在面板里显示提醒（不会自动删除任何东西），提示你该整理一下了；设为 0 可以关闭对应的提醒。
         </div>
         <div class="mem-row mem-status" id="mem-status"></div>`;
 
@@ -1344,6 +1421,9 @@ function buildPanelHtml() {
                 <button id="mem-core-manual-add-btn" class="menu_button mem-btn-primary"><i class="fa-solid fa-plus"></i> 手动添加核心记忆</button>
             </div>
 
+            <div class="mem-row">
+                <input type="text" id="mem-search" placeholder="🔍 搜索长期记忆内容…" value="" />
+            </div>
             <div class="mem-row mem-inline mem-filter-bar">
                 <label>时间：
                     <select id="mem-core-filter-time">
@@ -1382,6 +1462,9 @@ function buildPanelHtml() {
                 手动添加的记忆会直接保存为一条新条目，不影响自动总结的计数器（lastSummarizedIndex 不变）。
             </div>
 
+            <div class="mem-row">
+                <input type="text" id="mem-core-search" placeholder="🔍 搜索核心记忆内容…" value="" />
+            </div>
             <div class="mem-row mem-inline mem-filter-bar">
                 <label>时间：
                     <select id="mem-filter-time">
@@ -1421,6 +1504,9 @@ function buildPanelHtml() {
                 <button id="mem-export-btn" class="menu_button"><i class="fa-solid fa-file-export"></i> 导出记忆数据</button>
                 <button id="mem-import-btn" class="menu_button"><i class="fa-solid fa-file-import"></i> 导入记忆数据</button>
                 <input type="file" id="mem-import-file" accept="application/json" style="display:none" />
+            </div>
+            <div class="mem-row mem-inline">
+                <button id="mem-trash-btn" class="menu_button"><i class="fa-solid fa-trash-arrow-up"></i> 回收站<span id="mem-trash-count"></span></button>
             </div>
             <div class="mem-hint">
                 导出会把当前聊天的全部摘要、总结进度和插件设置打包成一个 JSON 文件，方便备份或换设备；
@@ -1532,6 +1618,7 @@ function buildCoreMemoryItemHtml(entry) {
         <textarea class="mem-core-text" data-id="${safeId}" rows="3">${escapeHtml(entry.content)}</textarea>
         <div class="mem-summary-actions">
             <button class="menu_button mem-core-copy" data-id="${safeId}"><i class="fa-solid fa-copy"></i> 复制</button>
+            ${entry.sourceIds && entry.sourceIds.length > 0 ? `<button class="menu_button mem-core-source" data-id="${safeId}"><i class="fa-solid fa-link"></i> 溯源</button>` : ""}
             <button class="menu_button mem-core-delete danger" data-id="${safeId}"><i class="fa-solid fa-trash"></i> 删除</button>
         </div>
     </div>
@@ -1667,7 +1754,12 @@ function updateOrderToggleButton(btnId, order) {
 function getFilteredSummaries() {
     const s = getSettings();
     const data = getChatData();
-    return filterEntriesByTimeAndChars(data.summaries, s.filterTimeRange, s.filterMinChars, s.filterMaxChars);
+    let items = filterEntriesByTimeAndChars(data.summaries, s.filterTimeRange, s.filterMinChars, s.filterMaxChars);
+    const kw = searchKeyword.trim().toLowerCase();
+    if (kw) {
+        items = items.filter((x) => (x.content || "").toLowerCase().includes(kw));
+    }
+    return items;
 }
 
 // 根据设置里的 summaryOrder 对数组进行排序（返回新数组，不修改原数组）
@@ -1679,7 +1771,12 @@ function getOrderedSummaries(arr) {
 function getFilteredCores() {
     const s = getSettings();
     const data = getChatData();
-    return filterEntriesByTimeAndChars(data.coreMemories || [], s.coreFilterTimeRange, s.coreFilterMinChars, s.coreFilterMaxChars);
+    let items = filterEntriesByTimeAndChars(data.coreMemories || [], s.coreFilterTimeRange, s.coreFilterMinChars, s.coreFilterMaxChars);
+    const kw = coreSearchKeyword.trim().toLowerCase();
+    if (kw) {
+        items = items.filter((x) => (x.content || "").toLowerCase().includes(kw));
+    }
+    return items;
 }
 function getOrderedCores(arr) {
     return orderEntries(arr, getSettings().coreOrder);
@@ -1751,7 +1848,10 @@ function updateStatusLine() {
 
     // 基础模式下的极简统计：只给一个数字，详细口径（含系统消息/字数/进度）留在"总结设置"里
     if (basicStatsDiv) {
-        basicStatsDiv.innerHTML = `当前记忆：<b>${data.summaries.length}</b> 条`;
+        const warnSummary = s.summaryWarnThreshold > 0 && data.summaries.length >= s.summaryWarnThreshold;
+        const warnCore = s.coreWarnThreshold > 0 && coreCount >= s.coreWarnThreshold;
+        const warnDot = (warnSummary || warnCore) ? ' <span class="mem-warn-dot" title="记忆条数较多，建议清理">⚠</span>' : "";
+        basicStatsDiv.innerHTML = `当前记忆：<b>${data.summaries.length}</b> 条${warnDot}`;
     }
     // "长期记忆"折叠标题右侧的小计数徽章，收起状态下也能一眼看到条数
     if (longtermCountEl) {
@@ -1772,6 +1872,8 @@ function updateStatusLine() {
         <div class="mem-status-line mem-status-sub">
             <span>距上次总结已过去 ${pending} 条，还差 ${remain} 条将自动触发${autoNote}</span>
         </div>
+        ${s.summaryWarnThreshold > 0 && data.summaries.length >= s.summaryWarnThreshold ? `<div class="mem-data-warn"><i class="fa-solid fa-triangle-exclamation"></i> 长期记忆已达 <b>${data.summaries.length}</b> 条（建议阈值 ${s.summaryWarnThreshold}），过多会拖慢面板加载，建议提取核心后清理旧条目</div>` : ""}
+        ${s.coreWarnThreshold > 0 && coreCount >= s.coreWarnThreshold ? `<div class="mem-data-warn"><i class="fa-solid fa-triangle-exclamation"></i> 核心记忆已达 <b>${coreCount}</b> 条（建议阈值 ${s.coreWarnThreshold}），建议合并相似条目以减少注入 token</div>` : ""}
     `;
 }
 
@@ -1861,12 +1963,38 @@ function bindPanelEvents() {
 
             if (target.classList.contains("mem-core-copy")) {
                 copyToClipboard(cores[idx].content, "已复制该条核心记忆");
+            } else if (target.classList.contains("mem-core-source")) {
+                // 溯源：展示这条核心记忆的来源长期记忆
+                const sourceIds = cores[idx].sourceIds || [];
+                if (sourceIds.length === 0) {
+                    toastInfo("这条核心记忆没有关联的来源记录（可能是手动添加的）");
+                    return;
+                }
+                const summaries = data.summaries || [];
+                const sourceItems = sourceIds.map((sid) => {
+                    const found = summaries.find((s) => s.id === sid);
+                    if (found) {
+                        return `<div class="mem-source-item"><div class="mem-source-header">${escapeHtml(found.time)} · ${(found.content || "").length} 字</div><div class="mem-source-content">${escapeHtml(found.content)}</div></div>`;
+                    }
+                    return `<div class="mem-source-item mem-source-gone"><i class="fa-solid fa-ghost"></i> 来源条目 (${escapeHtml(String(sid).slice(0, 12))}…) 已被删除或合并</div>`;
+                });
+                showModal({
+                    title: "核心记忆来源追溯",
+                    bodyHtml: `
+                        <div class="mem-modal-line">这条核心记忆提取自以下 <b>${sourceIds.length}</b> 条长期记忆：</div>
+                        <div class="mem-source-list">${sourceItems.join("")}</div>
+                    `,
+                    confirmText: "知道了",
+                    showCancel: false,
+                });
             } else if (target.classList.contains("mem-core-delete")) {
-                if (!confirm("删除这条核心记忆？删除后不可恢复。")) return;
-                cores.splice(idx, 1);
+                if (!confirm("删除这条核心记忆？将移入回收站（24小时内可恢复，最多保留10条）。")) return;
+                const removedCore = cores.splice(idx, 1)[0];
+                moveToTrash(removedCore, "core");
                 saveChatData();
                 updateInjection();
                 renderCoreMemories();
+                updateTrashCount();
             }
         } catch (err) {
             console.error("[记忆总结助手] 处理核心记忆列表点击事件异常：", err);
@@ -1999,6 +2127,16 @@ function bindPanelEvents() {
         s.styleReferenceCount = Math.max(0, parseInt(e.target.value) || 0);
         saveSettings();
     });
+    document.getElementById("mem-summary-warn-threshold")?.addEventListener("change", (e) => {
+        s.summaryWarnThreshold = Math.max(0, parseInt(e.target.value) || 0);
+        saveSettings();
+        updateStatusLine();
+    });
+    document.getElementById("mem-core-warn-threshold")?.addEventListener("change", (e) => {
+        s.coreWarnThreshold = Math.max(0, parseInt(e.target.value) || 0);
+        saveSettings();
+        updateStatusLine();
+    });
 
     document.getElementById("mem-run-now")?.addEventListener("click", async () => {
         await runSummarization(true);
@@ -2087,7 +2225,7 @@ function bindPanelEvents() {
             bodyHtml: `
                 <div class="mem-modal-line">确定要清空当前聊天已保存的全部 ${data.summaries.length} 条摘要文本吗？</div>
                 <div class="mem-modal-line">总结进度不会被重置，这些消息不会重新计入"待总结"队列，也不会被自动重新总结。</div>
-                <div class="mem-modal-line">此操作不可撤销。</div>
+                <div class="mem-modal-line" style="color:#e0a05a">⚠️ 注意：这个操作<b>不会经过回收站</b>，清空后无法恢复（回收站只保留单条删除，一次性清空不受保护）。</div>
             `,
             confirmText: "确认清空",
             cancelText: "取消",
@@ -2133,6 +2271,85 @@ function bindPanelEvents() {
         e.target.value = ""; // 重置一下，保证再次选同一个文件也能触发 change
         if (!file) return;
         await importDataFromFile(file);
+    });
+
+    // 回收站按钮
+    document.getElementById("mem-trash-btn")?.addEventListener("click", async () => {
+        const validItems = getValidTrashItems();
+        if (validItems.length === 0) {
+            toastInfo("回收站是空的（被删除的记忆最多保留 10 条、24 小时内可恢复）");
+            return;
+        }
+
+        const itemsHtml = validItems.map((t, i) => {
+            const ago = Math.round((Date.now() - t.deletedAt) / 60000);
+            const agoText = ago < 60 ? `${ago} 分钟前删除` : `${Math.round(ago / 60)} 小时前删除`;
+            const typeLabel = t.type === "core" ? "核心记忆" : "长期记忆";
+            const preview = (t.entry.content || "").slice(0, 80) + ((t.entry.content || "").length > 80 ? "…" : "");
+            return `
+                <label class="mem-trash-item">
+                    <input type="checkbox" class="mem-trash-chk" data-trash-idx="${i}" checked />
+                    <div class="mem-trash-info">
+                        <span class="mem-badge ${t.type ==="core" ? "mem-badge-core" : "mem-badge-auto"}">${escapeHtml(typeLabel)}</span>
+                        <span class="mem-trash-ago">${escapeHtml(agoText)}</span>
+                        <div class="mem-trash-preview">${escapeHtml(preview)}</div>
+                    </div>
+                </label>`;
+        }).join("");
+
+        const result = await showModal({
+            title: "回收站",
+            bodyHtml: `
+                <div class="mem-modal-line">以下是最近删除的记忆（24 小时内可恢复，最多保留 10 条）：</div>
+                <div class="mem-modal-line" style="margin-top:4px;font-size:0.82em;opacity:0.65">勾选要恢复的条目，点击"恢复选中"即可放回原位。</div>
+                <div class="mem-trash-list">${itemsHtml}</div>
+            `,
+            confirmText: "恢复选中",
+            cancelText: "关闭",
+            showCancel: true,
+            onConfirm: (bodyEl) => {
+                const checked = Array.from(bodyEl.querySelectorAll(".mem-trash-chk:checked"));
+                return checked.map((chk) => parseInt(chk.dataset.trashIdx, 10)).filter((n) => !isNaN(n));
+            },
+        });
+
+        if (!result) return; // 点了"关闭"或按了 Esc，直接退出，不提示
+        if (!Array.isArray(result) || result.length === 0) {
+            toastInfo("没有勾选任何条目，未恢复");
+            return;
+        }
+
+        const data = getChatData();
+        let restoredSummary = 0;
+        let restoredCore = 0;
+
+        // 按索引从大到小排序，这样从后往前 splice 不会打乱前面的索引
+        const sortedIndices = result.slice().sort((a, b) => b - a);
+        for (const idx of sortedIndices) {
+            if (idx < 0 || idx >= validItems.length) continue;
+            const trashItem = validItems[idx];
+            if (trashItem.type === "core") {
+                if (!data.coreMemories) data.coreMemories = [];
+                data.coreMemories.push(trashItem.entry);
+                restoredCore++;
+            } else {
+                data.summaries.push(trashItem.entry);
+                restoredSummary++;
+            }
+            // 从 trashBin 里移除已恢复的条目
+            const binIdx = data.trashBin.indexOf(trashItem);
+            if (binIdx !== -1) data.trashBin.splice(binIdx, 1);
+        }
+
+        saveChatData();
+        updateInjection();
+        renderPanel();
+        updateTrashCount();
+
+        const parts = [];
+        if (restoredSummary > 0) parts.push(`${restoredSummary} 条长期记忆`);
+        if (restoredCore > 0) parts.push(`${restoredCore} 条核心记忆`);
+        toastSuccess(`已恢复 ${parts.join("、")}`);
     });
 
     document.getElementById("mem-wi-refresh")?.addEventListener("click", () => {
@@ -2228,6 +2445,21 @@ function bindPanelEvents() {
         renderPanel();
     });
 
+    // 长期记忆全文搜索：关键词本身立即更新，但重渲染整个列表做了防抖（见 debounce 定义处的说明）
+    const debouncedRenderPanelForSearch = debounce(() => renderPanel(), 200);
+    document.getElementById("mem-search")?.addEventListener("input", (e) => {
+        searchKeyword = e.target.value;
+        summaryShowAll = false;
+        debouncedRenderPanelForSearch();
+    });
+
+    // 核心记忆全文搜索
+    const debouncedRenderCoreForSearch = debounce(() => renderCoreMemories(), 200);
+    document.getElementById("mem-core-search")?.addEventListener("input", (e) => {
+        coreSearchKeyword = e.target.value;
+        coreShowAll = false;
+        debouncedRenderCoreForSearch();
+    });
     // 排序切换按钮
     document.getElementById("mem-order-toggle")?.addEventListener("click", () => {
         s.summaryOrder = s.summaryOrder === "desc" ? "asc" : "desc";
@@ -2260,12 +2492,14 @@ function bindPanelEvents() {
             } else if (target.classList.contains("mem-delete-one")) {
                 // 删除只移除这条摘要文本，不会让对应的消息重新变回"待总结"状态
                 // （lastSummarizedIndex 不受影响），避免同一段对话被重复总结、重复消耗 Token。
-                if (!confirm('删除这条总结？删除后不可恢复，对应的消息也不会重新变为"待总结"状态。')) return;
-                data.summaries.splice(entryIndex, 1);
+                if (!confirm('删除这条总结？将移入回收站（24小时内可恢复，最多保留10条）。')) return;
+                const removedSummary = data.summaries.splice(entryIndex, 1)[0];
+                moveToTrash(removedSummary, "summary");
                 selectedForCoreIds.delete(id);
                 saveChatData();
                 updateInjection();
                 renderPanel();
+                updateTrashCount();
             }
         } catch (err) {
             // 委托点击回调本身是 async 函数，抛出的异常会变成"未处理的 Promise 拒绝"而不是
@@ -2524,6 +2758,7 @@ if (window.__memSummarizerLoaded) {
         bindPanelEvents();
         renderPanel();
         updateInjection();
+        updateTrashCount();
 
         // 监听消息事件，自动计数/自动总结
         eventSource.on(event_types.MESSAGE_RECEIVED, onChatEvent);
@@ -2537,8 +2772,17 @@ if (window.__memSummarizerLoaded) {
                 // 切换聊天后，之前勾选的"待提取核心"条目属于上一个聊天，直接清空，
                 // 避免误把这次聊天里同名 id（理论上不会重复，但清空更保险）的条目带入提取。
                 selectedForCoreIds.clear();
+                // 清空搜索词，避免把上一个聊天的搜索词带到新聊天
+                searchKeyword = "";
+                coreSearchKeyword = "";
+                const searchEl = document.getElementById("mem-search");
+                if (searchEl) searchEl.value = "";
+                const coreSearchEl = document.getElementById("mem-core-search");
+                if (coreSearchEl) coreSearchEl.value = "";
                 renderPanel();
                 updateInjection();
+                // 回收站是存在每个聊天自己的 chatMetadata 里的，换了聊天数量也要跟着刷新
+                updateTrashCount();
             } catch (e) {
                 console.error("[记忆总结助手] 处理聊天切换事件异常：", e);
             }
