@@ -96,11 +96,14 @@ const defaultSettings = {
     sectionOpenInject: false,         // ▼ 注入设置
     sectionOpenWorldbook: false,      // ▼ 世界书
     sectionOpenLongterm: false,       // ▼ 长期记忆（含核心记忆）
+    sectionOpenDataManage: false,     // ▼ 数据管理（统计 / 导出导入 / 回收站）
 
     summaryOrder: "desc",             // 长期记忆列表显示/注入顺序："desc"=倒序(新在前) "asc"=正序(旧在前)
     filterMinChars: 0,                // 筛选：最小字数，0=不限
     filterMaxChars: 0,                // 筛选：最大字数，0=不限
     filterTimeRange: "all",           // 筛选：时间范围 "all" / "1h" / "24h" / "7d" / "30d"
+    filterTier: "all",                // 筛选：分级 "all" / "important" / "normal" / "deprecated"
+    coreHideDeprecated: false,        // 核心记忆列表是否隐藏已废弃条目
 
     // 核心记忆：筛选/顺序调整/分页，字段含义与上面长期记忆的同名字段完全一致，独立存储互不影响
     coreOrder: "desc",
@@ -181,6 +184,43 @@ function updateTrashCount() {
     if (!el) return;
     const count = getValidTrashItems().length;
     el.textContent = count > 0 ? ` (${count})` : "";
+}
+
+// 统计面板用的数据。全部基于当前已有字段实时计算，不额外持久化任何"统计值"本身——
+// 这样统计永远和实际数据保持一致，不会出现"计数器"和真实条数对不上的情况。
+function computeMemoryStats() {
+    const data = getChatData();
+    const summaries = data.summaries || [];
+    const cores = data.coreMemories || [];
+    const now = new Date();
+    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).getTime();
+    const isThisMonth = (x) => Number.isFinite(x.timestamp) && x.timestamp >= monthStart;
+    return {
+        summaryCount: summaries.length,
+        coreCount: cores.length,
+        importantCount: summaries.filter((x) => x.tier === "important").length,
+        deprecatedSummaryCount: summaries.filter((x) => x.tier === "deprecated").length,
+        deprecatedCoreCount: cores.filter((x) => x.deprecated).length,
+        newThisMonth: summaries.filter(isThisMonth).length + cores.filter(isThisMonth).length,
+        trashCount: getValidTrashItems().length,
+    };
+}
+
+function updateDataStats() {
+    const el = document.getElementById("mem-data-stats");
+    if (!el) return;
+    const st = computeMemoryStats();
+    el.innerHTML = `
+        <div class="mem-stats-grid">
+            <div class="mem-stat-cell"><div class="mem-stat-num">${st.summaryCount}</div><div class="mem-stat-label">长期记忆</div></div>
+            <div class="mem-stat-cell"><div class="mem-stat-num">${st.coreCount}</div><div class="mem-stat-label">核心记忆</div></div>
+            <div class="mem-stat-cell"><div class="mem-stat-num">${st.newThisMonth}</div><div class="mem-stat-label">本月新增</div></div>
+            <div class="mem-stat-cell"><div class="mem-stat-num">${st.trashCount}</div><div class="mem-stat-label">回收站</div></div>
+        </div>
+        <div class="mem-status-line mem-status-sub">
+            <span>其中：重要 <b>${st.importantCount}</b> 条 · 已废弃（长期）<b>${st.deprecatedSummaryCount}</b> 条 · 已废弃（核心）<b>${st.deprecatedCoreCount}</b> 条</span>
+        </div>
+    `;
 }
 
 function saveChatData() {
@@ -532,6 +572,8 @@ async function runSummarization(manual = false) {
             range: [startIdx, endIdx],
             content: trimmed,
             auto: !manual,
+            source: "auto",  // 内容始终由 AI 总结生成（不管触发方式是自动还是手动点的"立即总结"）
+            tier: "normal",  // 分级：important / normal / deprecated，默认普通
         };
         data.summaries.push(entry); // 新条目始终追加在数组末尾（旧条目下方）
         data.lastSummarizedIndex = endIdx;
@@ -592,9 +634,11 @@ function updateInjection() {
     // 注入时遵循各自的显示顺序设置（核心记忆现在也支持拖拽调整顺序，
     // 所以和长期记忆一样，"最近 N 条"要按当前排序设置来取，而不是总取存储数组的末尾，
     // 否则用户手动拖拽调整过顺序后，注入的条目会和面板上看到的顺序对不上）。
-    const orderedCore = getOrderedCores(data.coreMemories || []);
+    // 已标记"废弃"的条目直接排除在外——这是废弃标记存在的核心意义：不再喂给 AI，
+    // 但仍然保留在列表里，随时可以取消废弃、恢复注入。
+    const orderedCore = getOrderedCores((data.coreMemories || []).filter((x) => !x.deprecated));
     const recentCore = orderedCore.slice(0, settings.coreInjectCount);
-    const orderedSummary = getOrderedSummaries(data.summaries);
+    const orderedSummary = getOrderedSummaries(data.summaries.filter((x) => x.tier !== "deprecated"));
     const recentSummary = orderedSummary.slice(0, settings.injectCount);
 
     if (recentCore.length === 0 && recentSummary.length === 0) {
@@ -695,6 +739,7 @@ async function runCoreSummarization(selectedIds) {
             timestamp: Date.now(),
             content: trimmed,
             sourceIds: selectedIds.slice(),
+            source: "extracted", // 从长期记忆 AI 提取生成
         };
         if (!data.coreMemories) data.coreMemories = [];
         data.coreMemories.push(coreEntry);
@@ -730,6 +775,8 @@ async function runCoreSummarization(selectedIds) {
                 ],
                 content: mergedContent,
                 auto: false,
+                source: "merged", // 已提取核心的原始条目合并生成
+                tier: "normal",
             };
             // 移除原始条目
             data.summaries = data.summaries.filter((s) => !selectedIds.includes(s.id));
@@ -910,9 +957,11 @@ async function writeMergedMemoryToWorldInfo(kind, triggerBtn) {
 
     const data = getChatData();
     const isCore = kind === "core";
-    const rawList = isCore ? (data.coreMemories || []) : data.summaries;
+    const rawList = isCore
+        ? (data.coreMemories || []).filter((x) => !x.deprecated)
+        : data.summaries.filter((x) => x.tier !== "deprecated");
     if (rawList.length === 0) {
-        toastInfo(isCore ? "当前没有核心记忆可写入" : "当前没有长期记忆可写入");
+        toastInfo(isCore ? "当前没有可写入的核心记忆（可能全部已标记废弃）" : "当前没有可写入的长期记忆（可能全部已标记废弃）");
         return;
     }
 
@@ -1143,6 +1192,8 @@ async function importDataFromFile(file) {
                     timestamp: Number.isFinite(raw.timestamp) ? raw.timestamp : undefined,
                     content: String(raw.content),
                     sourceIds: Array.isArray(raw.sourceIds) ? raw.sourceIds : [],
+                    source: SOURCE_LABELS[raw.source] ? raw.source : undefined,
+                    deprecated: !!raw.deprecated,
                 });
                 importedCoreCount++;
             }
@@ -1166,6 +1217,8 @@ async function importDataFromFile(file) {
                     range: Array.isArray(raw.range) && raw.range.length === 2 ? raw.range : [0, 0],
                     content: String(raw.content),
                     auto: !!raw.auto,
+                    source: SOURCE_LABELS[raw.source] ? raw.source : undefined,
+                    tier: ["important", "normal", "deprecated"].includes(raw.tier) ? raw.tier : "normal",
                 });
                 importedCount++;
             }
@@ -1232,9 +1285,11 @@ function syncSettingsToForm() {
     setVal("mem-filter-time", s.filterTimeRange);
     setVal("mem-filter-min", s.filterMinChars);
     setVal("mem-filter-max", s.filterMaxChars);
+    setVal("mem-filter-tier", s.filterTier);
     setVal("mem-core-filter-time", s.coreFilterTimeRange);
     setVal("mem-core-filter-min", s.coreFilterMinChars);
     setVal("mem-core-filter-max", s.coreFilterMaxChars);
+    setChecked("mem-core-hide-deprecated", s.coreHideDeprecated);
     updateOrderToggleButton("mem-order-toggle", s.summaryOrder);
     updateOrderToggleButton("mem-core-order-toggle", s.coreOrder);
     populateWorldBookSelect();
@@ -1253,6 +1308,7 @@ const SECTION_SETTING_KEYS = {
     inject: "sectionOpenInject",
     worldbook: "sectionOpenWorldbook",
     longterm: "sectionOpenLongterm",
+    dataManage: "sectionOpenDataManage",
 };
 
 // 生成一个"高级"折叠分组的外壳（标题按钮 + 可折叠内容区）。
@@ -1436,13 +1492,15 @@ function buildPanelHtml() {
                 </label>
                 <label>字数≥<input type="number" id="mem-core-filter-min" min="0" value="${s.coreFilterMinChars}" style="width:55px"/></label>
                 <label>字数≤<input type="number" id="mem-core-filter-max" min="0" value="${s.coreFilterMaxChars}" style="width:55px" placeholder="0=不限"/></label>
+                <label><input type="checkbox" id="mem-core-hide-deprecated" ${s.coreHideDeprecated ? "checked" : ""}/> 隐藏已废弃</label>
                 <button id="mem-core-order-toggle" class="menu_button" title="切换显示/注入顺序">
                     <i class="fa-solid ${s.coreOrder === "desc" ? "fa-arrow-down-wide-short" : "fa-arrow-up-wide-short"}"></i>
                     <span>${s.coreOrder === "desc" ? "倒序(新→旧)" : "正序(旧→新)"}</span>
                 </button>
             </div>
             <div class="mem-hint">
-                排序会同时影响面板显示和注入给 AI 的上下文顺序；长按某条核心记忆可拖动调整顺序（自动保存）。筛选仅影响面板显示，不影响注入。
+                排序会同时影响面板显示和注入给 AI 的上下文顺序；长按某条核心记忆可拖动调整顺序（自动保存）。<br/>
+                时间/字数筛选、"隐藏已废弃"只影响面板显示；但已标记废弃的条目本身始终会被排除在注入和写入世界书之外，不管这个勾选框状态如何。
             </div>
 
             <div id="mem-core-list" class="mem-summary-list"></div>
@@ -1477,13 +1535,23 @@ function buildPanelHtml() {
                 </label>
                 <label>字数≥<input type="number" id="mem-filter-min" min="0" value="${s.filterMinChars}" style="width:55px"/></label>
                 <label>字数≤<input type="number" id="mem-filter-max" min="0" value="${s.filterMaxChars}" style="width:55px" placeholder="0=不限"/></label>
+                <label>分级：
+                    <select id="mem-filter-tier">
+                        <option value="all"${s.filterTier === "all" ? " selected" : ""}>全部</option>
+                        <option value="important"${s.filterTier === "important" ? " selected" : ""}>⭐ 重要</option>
+                        <option value="normal"${s.filterTier === "normal" ? " selected" : ""}>🔵 普通</option>
+                        <option value="deprecated"${s.filterTier === "deprecated" ? " selected" : ""}>🚫 废弃</option>
+                    </select>
+                </label>
                 <button id="mem-order-toggle" class="menu_button" title="切换显示/注入顺序">
                     <i class="fa-solid ${s.summaryOrder === "desc" ? "fa-arrow-down-wide-short" : "fa-arrow-up-wide-short"}"></i>
                     <span>${s.summaryOrder === "desc" ? "倒序(新→旧)" : "正序(旧→新)"}</span>
                 </button>
             </div>
             <div class="mem-hint">
-                排序会同时影响面板显示和注入给 AI 的上下文顺序；长按某条记忆可拖动调整顺序（自动保存）。筛选仅影响面板显示，不影响注入。
+                排序会同时影响面板显示和注入给 AI 的上下文顺序；长按某条记忆可拖动调整顺序（自动保存）。<br/>
+                时间/字数/分级这几个筛选条件只影响面板里显示哪些条目，不影响注入给 AI 的内容——
+                唯一的例外是分级里的"🚫 废弃"：被标记废弃的条目本身就会被排除在"自动注入到上下文"和"写入世界书"之外，这条规则始终生效，与筛选框选的是什么无关。
             </div>
 
             <div class="mem-row mem-inline">
@@ -1500,21 +1568,34 @@ function buildPanelHtml() {
                 "重置总结进度"只重置计数指针，让全部聊天记录重新变为待总结状态（开着自动总结的话可能会连续触发较多新总结、消耗更多 Token），不会影响已保存的摘要文本。
             </div>
 
-            <div class="mem-row mem-inline">
-                <button id="mem-export-btn" class="menu_button"><i class="fa-solid fa-file-export"></i> 导出记忆数据</button>
-                <button id="mem-import-btn" class="menu_button"><i class="fa-solid fa-file-import"></i> 导入记忆数据</button>
-                <input type="file" id="mem-import-file" accept="application/json" style="display:none" />
-            </div>
-            <div class="mem-row mem-inline">
-                <button id="mem-trash-btn" class="menu_button"><i class="fa-solid fa-trash-arrow-up"></i> 回收站<span id="mem-trash-count"></span></button>
-            </div>
-            <div class="mem-hint">
-                导出会把当前聊天的全部摘要、总结进度和插件设置打包成一个 JSON 文件，方便备份或换设备；
-                导入时可以分别选择只导入摘要、只导入设置，摘要会追加在当前聊天已有摘要之后，不会覆盖。
-            </div>
-
             <div id="mem-summary-list" class="mem-summary-list"></div>
             <div id="mem-summary-pagination" class="mem-row mem-inline" style="justify-content:center"></div>
+        </div>`;
+
+    // ------ 数据管理（统计 / 导出导入 / 回收站）------
+    const dataManageSectionHtml = `
+        <div class="mem-row mem-status" id="mem-data-stats"></div>
+        <div class="mem-hint">
+            "本月新增"按条目实际生成时间统计的长期记忆+核心记忆之和；很早以前（本插件更新此功能之前）生成的旧条目
+            没有精确时间戳，不会被计入本月新增，但仍会计入下面的总条数，不影响其它任何功能。
+        </div>
+
+        <div class="mem-row mem-inline">
+            <button id="mem-export-btn" class="menu_button"><i class="fa-solid fa-file-export"></i> 导出记忆数据</button>
+            <button id="mem-import-btn" class="menu_button"><i class="fa-solid fa-file-import"></i> 导入记忆数据</button>
+            <input type="file" id="mem-import-file" accept="application/json" style="display:none" />
+        </div>
+        <div class="mem-hint">
+            导出会把当前聊天的全部摘要、总结进度和插件设置打包成一个 JSON 文件，方便备份或换设备；
+            导入时可以分别选择只导入摘要、只导入设置，摘要会追加在当前聊天已有摘要之后，不会覆盖。
+        </div>
+
+        <div class="mem-row mem-inline">
+            <button id="mem-trash-btn" class="menu_button"><i class="fa-solid fa-trash-arrow-up"></i> 回收站<span id="mem-trash-count"></span></button>
+        </div>
+        <div class="mem-hint">
+            长期记忆/核心记忆里的单条删除都会先进回收站，24 小时内、最多保留最近 10 条可以恢复；
+            "长期记忆"里的"清空摘要文本"这类批量操作不经过回收站，请谨慎使用。
         </div>`;
 
     return `
@@ -1559,6 +1640,7 @@ function buildPanelHtml() {
                 ${buildSectionHtml("inject", "fa-syringe", "注入设置", injectSectionHtml)}
                 ${buildSectionHtml("worldbook", "fa-book-atlas", "世界书", worldbookSectionHtml)}
                 ${buildSectionHtml("longterm", "fa-layer-group", "长期记忆", longtermSectionHtml, '<span class="mem-section-count" id="mem-section-count-longterm"></span>')}
+                ${buildSectionHtml("dataManage", "fa-database", "数据管理", dataManageSectionHtml)}
 
             </div>
         </div>
@@ -1567,9 +1649,10 @@ function buildPanelHtml() {
 }
 
 function buildSummaryItemHtml(entry) {
-    const badge = entry.auto
-        ? '<span class="mem-badge mem-badge-auto"><i class="fa-solid fa-robot"></i> 自动</span>'
-        : '<span class="mem-badge mem-badge-manual"><i class="fa-solid fa-hand"></i> 手动</span>';
+    const src = getEntrySource(entry);
+    const srcLabel = SOURCE_LABELS[src] || SOURCE_LABELS.manual;
+    const badge = `<span class="mem-badge mem-badge-${src}"><i class="fa-solid ${srcLabel.icon}"></i> ${srcLabel.text}</span>`;
+    const status = getMemoryStatus(entry);
     const charCount = (entry.content || "").length;
     const hasRealRange = Array.isArray(entry.range) && (entry.range[0] !== 0 || entry.range[1] !== 0);
     // 手动添加的记忆没有真实的消息范围（约定用 [0,0] 占位），显示"消息 1-0"会让人以为是个 bug，
@@ -1583,11 +1666,14 @@ function buildSummaryItemHtml(entry) {
     // 否则精心构造的 id（比如含有引号）可以逃出属性、注入任意标签/脚本。
     const safeId = escapeHtml(entry.id);
     const checked = selectedForCoreIds.has(entry.id) ? " checked" : "";
+    const tier = entry.tier || "normal";
+    const deprecatedClass = tier === "deprecated" ? " mem-item-deprecated" : "";
     return `
-    <div class="mem-summary-item${isNew ? " mem-item-new" : ""}" data-id="${safeId}">
+    <div class="mem-summary-item${isNew ? " mem-item-new" : ""}${deprecatedClass}" data-id="${safeId}">
         <div class="mem-summary-header">
             <div class="mem-summary-header-left">
                 <input type="checkbox" class="mem-select-for-core" data-id="${safeId}"${checked} title="选中以提取核心记忆" />
+                <span class="mem-status-icon" title="${status.text}">${status.icon}</span>
                 ${badge}
                 <span>${rangeLabel} · ${charCount} 字</span>
             </div>
@@ -1595,6 +1681,11 @@ function buildSummaryItemHtml(entry) {
         </div>
         <textarea class="mem-summary-text" data-id="${safeId}" rows="3">${escapeHtml(entry.content)}</textarea>
         <div class="mem-summary-actions">
+            <select class="mem-tier-select mem-tier-${tier}" data-id="${safeId}" title="记忆分级，废弃后不会再注入给 AI">
+                <option value="normal"${tier === "normal" ? " selected" : ""}>🔵 普通</option>
+                <option value="important"${tier === "important" ? " selected" : ""}>⭐ 重要</option>
+                <option value="deprecated"${tier === "deprecated" ? " selected" : ""}>🚫 废弃</option>
+            </select>
             <button class="menu_button mem-copy-one" data-id="${safeId}"><i class="fa-solid fa-copy"></i> 复制</button>
             <button class="menu_button mem-delete-one danger" data-id="${safeId}"><i class="fa-solid fa-trash"></i> 删除</button>
         </div>
@@ -1606,11 +1697,18 @@ function buildCoreMemoryItemHtml(entry) {
     const charCount = (entry.content || "").length;
     const isNew = entry.id === lastAddedCoreId;
     const safeId = escapeHtml(entry.id); // 同上：来自导入文件的 id 不可信，必须转义
+    const src = getEntrySource(entry);
+    const srcLabel = src === "manual" ? SOURCE_LABELS.manual : SOURCE_LABELS.extracted;
+    const isDeprecated = !!entry.deprecated;
+    const statusIcon = isDeprecated ? "🔴" : "🟢";
+    const statusText = isDeprecated ? "已废弃" : "已确认";
     return `
-    <div class="mem-summary-item mem-core-item${isNew ? " mem-item-new" : ""}" data-id="${safeId}">
+    <div class="mem-summary-item mem-core-item${isNew ? " mem-item-new" : ""}${isDeprecated ? " mem-item-deprecated" : ""}" data-id="${safeId}">
         <div class="mem-summary-header">
             <div class="mem-summary-header-left">
+                <span class="mem-status-icon" title="${statusText}">${statusIcon}</span>
                 <span class="mem-badge mem-badge-core">核心</span>
+                <span class="mem-badge mem-badge-${src}"><i class="fa-solid ${srcLabel.icon}"></i> ${srcLabel.text}</span>
                 <span>${charCount} 字</span>
             </div>
             <div class="mem-summary-time" title="真实的总结完成时间">${escapeHtml(entry.time)}</div>
@@ -1619,6 +1717,9 @@ function buildCoreMemoryItemHtml(entry) {
         <div class="mem-summary-actions">
             <button class="menu_button mem-core-copy" data-id="${safeId}"><i class="fa-solid fa-copy"></i> 复制</button>
             ${entry.sourceIds && entry.sourceIds.length > 0 ? `<button class="menu_button mem-core-source" data-id="${safeId}"><i class="fa-solid fa-link"></i> 溯源</button>` : ""}
+            <button class="menu_button mem-core-toggle-deprecated" data-id="${safeId}" title="废弃后不会再注入给 AI，但仍保留在列表里，可以随时恢复">
+                <i class="fa-solid ${isDeprecated ? "fa-rotate-left" : "fa-ban"}"></i> ${isDeprecated ? "恢复启用" : "标记废弃"}
+            </button>
             <button class="menu_button mem-core-delete danger" data-id="${safeId}"><i class="fa-solid fa-trash"></i> 删除</button>
         </div>
     </div>
@@ -1697,6 +1798,35 @@ function parseEntryTime(entry) {
     return Number.isFinite(t) ? t : 0;
 }
 
+// 条目来源标签。新条目会显式写入 source 字段（见各个创建入口）；
+// 老数据没有这个字段时，从已有的 id 前缀 / auto 字段推断，不需要迁移旧数据。
+const SOURCE_LABELS = {
+    auto: { icon: "fa-robot", text: "自动总结" },
+    manual: { icon: "fa-hand", text: "手动添加" },
+    merged: { icon: "fa-link", text: "核心合并生成" },
+    extracted: { icon: "fa-gem", text: "核心提取" },
+};
+function getEntrySource(entry) {
+    if (entry.source && SOURCE_LABELS[entry.source]) return entry.source;
+    const id = String(entry.id || "");
+    if (id.startsWith("merged-")) return "merged";
+    if (id.startsWith("manual-core-")) return "manual";
+    if (id.startsWith("core-")) return "extracted";
+    if (id.startsWith("manual-")) return "manual";
+    return entry.auto ? "auto" : "manual";
+}
+
+// 长期记忆的"状态"指示（🟢已确认 / 🟡待确认 / 🔴已废弃），完全由已有字段推导，
+// 不需要额外的人工审核流程：废弃优先；AI 自动生成且没被标记"重要"的算待确认；
+// 其余（用户自己写的、AI 生成但用户主动标了"重要"的、核心提取/合并生成的）都算已确认，
+// 因为能落到这几种情况本身就意味着有人主动做过一次选择。
+function getMemoryStatus(entry) {
+    if (entry.tier === "deprecated") return { icon: "🔴", text: "已废弃" };
+    const src = getEntrySource(entry);
+    if (src === "auto" && entry.tier !== "important") return { icon: "🟡", text: "待确认" };
+    return { icon: "🟢", text: "已确认" };
+}
+
 // 通用筛选：按时间范围 + 字数区间过滤一个条目数组（不修改原数组）。
 // 长期记忆和核心记忆共用这一份逻辑，只是各自传入自己的筛选设置。
 function filterEntriesByTimeAndChars(list, timeRange, minChars, maxChars) {
@@ -1755,6 +1885,9 @@ function getFilteredSummaries() {
     const s = getSettings();
     const data = getChatData();
     let items = filterEntriesByTimeAndChars(data.summaries, s.filterTimeRange, s.filterMinChars, s.filterMaxChars);
+    if (s.filterTier && s.filterTier !== "all") {
+        items = items.filter((x) => (x.tier || "normal") === s.filterTier);
+    }
     const kw = searchKeyword.trim().toLowerCase();
     if (kw) {
         items = items.filter((x) => (x.content || "").toLowerCase().includes(kw));
@@ -1772,6 +1905,9 @@ function getFilteredCores() {
     const s = getSettings();
     const data = getChatData();
     let items = filterEntriesByTimeAndChars(data.coreMemories || [], s.coreFilterTimeRange, s.coreFilterMinChars, s.coreFilterMaxChars);
+    if (s.coreHideDeprecated) {
+        items = items.filter((x) => !x.deprecated);
+    }
     const kw = coreSearchKeyword.trim().toLowerCase();
     if (kw) {
         items = items.filter((x) => (x.content || "").toLowerCase().includes(kw));
@@ -1884,6 +2020,8 @@ function renderPanel() {
     const settings = getSettings();
     updateStatusLine();
     renderCoreMemories();
+    updateDataStats();
+    updateTrashCount();
 
     const list = document.getElementById("mem-summary-list");
     const paginationDiv = document.getElementById("mem-summary-pagination");
@@ -1987,6 +2125,11 @@ function bindPanelEvents() {
                     confirmText: "知道了",
                     showCancel: false,
                 });
+            } else if (target.classList.contains("mem-core-toggle-deprecated")) {
+                cores[idx].deprecated = !cores[idx].deprecated;
+                saveChatData();
+                updateInjection(); // 废弃状态直接影响是否还会被注入给 AI
+                renderCoreMemories();
             } else if (target.classList.contains("mem-core-delete")) {
                 if (!confirm("删除这条核心记忆？将移入回收站（24小时内可恢复，最多保留10条）。")) return;
                 const removedCore = cores.splice(idx, 1)[0];
@@ -2037,6 +2180,7 @@ function bindPanelEvents() {
             timestamp: Date.now(),
             content: content,
             sourceIds: [], // 手动添加的没有来源摘要
+            source: "manual",
         };
         data.coreMemories.push(entry);
         lastAddedCoreId = entry.id;
@@ -2062,6 +2206,12 @@ function bindPanelEvents() {
     });
     document.getElementById("mem-core-filter-max")?.addEventListener("change", (e) => {
         s.coreFilterMaxChars = Math.max(0, parseInt(e.target.value) || 0);
+        saveSettings();
+        coreShowAll = false;
+        renderCoreMemories();
+    });
+    document.getElementById("mem-core-hide-deprecated")?.addEventListener("change", (e) => {
+        s.coreHideDeprecated = e.target.checked;
         saveSettings();
         coreShowAll = false;
         renderCoreMemories();
@@ -2410,6 +2560,8 @@ function bindPanelEvents() {
             range: [0, 0], // 手动添加的没有消息范围
             content: content,
             auto: false,
+            source: "manual",
+            tier: "normal",
         };
         data.summaries.push(entry);
         // 注意：不修改 lastSummarizedIndex，手动添加不影响自动总结计数器
@@ -2440,6 +2592,14 @@ function bindPanelEvents() {
     // 筛选：最大字数
     document.getElementById("mem-filter-max")?.addEventListener("change", (e) => {
         s.filterMaxChars = Math.max(0, parseInt(e.target.value) || 0);
+        saveSettings();
+        summaryShowAll = false;
+        renderPanel();
+    });
+
+    // 筛选：分级
+    document.getElementById("mem-filter-tier")?.addEventListener("change", (e) => {
+        s.filterTier = e.target.value;
         saveSettings();
         summaryShowAll = false;
         renderPanel();
@@ -2527,6 +2687,15 @@ function bindPanelEvents() {
                 selectedForCoreIds.add(id);
             } else {
                 selectedForCoreIds.delete(id);
+            }
+        } else if (target.classList.contains("mem-tier-select")) {
+            const data = getChatData();
+            const entry = data.summaries.find((x) => x.id === id);
+            if (entry) {
+                entry.tier = target.value;
+                saveChatData();
+                updateInjection(); // 废弃/重要都会影响注入范围，必须重新计算
+                renderPanel();     // 当前如果有分级筛选，这条可能需要从列表里消失/出现
             }
         }
     });

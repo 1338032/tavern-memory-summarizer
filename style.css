@@ -188,6 +188,32 @@
     font-size: 0.8em;
 }
 
+/* 数据管理面板里的统计小卡片：4 格网格，手机窄屏也能一行放下 */
+.mem-stats-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 8px;
+    margin-bottom: 4px;
+}
+.mem-stat-cell {
+    text-align: center;
+    background: var(--mem-glass-bg-strong);
+    border: 1px solid var(--mem-glass-border);
+    border-radius: var(--mem-radius-sm);
+    padding: 8px 4px;
+}
+.mem-stat-num {
+    font-size: 1.3em;
+    font-weight: 700;
+    color: var(--mem-accent-2);
+    line-height: 1.3;
+}
+.mem-stat-label {
+    font-size: 0.75em;
+    opacity: 0.7;
+    margin-top: 2px;
+}
+
 .mem-progress {
     width: 100%;
     height: 6px;
@@ -592,9 +618,46 @@
     background: rgba(140, 140, 140, 0.2);
     color: #999;
 }
+.mem-badge-merged {
+    background: rgba(150, 110, 220, 0.2);
+    color: #b79cf0;
+}
+.mem-badge-extracted {
+    background: rgba(220, 160, 50, 0.22);
+    color: var(--mem-accent-gold-2);
+}
 .mem-badge-core {
     background: rgba(220, 160, 50, 0.22);
     color: var(--mem-accent-gold-2);
+}
+
+.mem-status-icon {
+    font-size: 0.9em;
+    line-height: 1;
+    cursor: default;
+}
+
+/* 分级下拉：基础外观继承自上面的通用 select 样式，这里只叠加"重要/废弃"的强调色 */
+.mem-tier-select {
+    font-size: 0.85em;
+    padding: 2px 6px;
+    min-height: auto;
+}
+.mem-tier-select.mem-tier-important {
+    border-color: rgba(220, 160, 50, 0.5);
+    color: var(--mem-accent-gold-2);
+}
+.mem-tier-select.mem-tier-deprecated {
+    border-color: rgba(200, 90, 90, 0.5);
+    color: #d67a7a;
+}
+
+/* 已废弃的条目整体调暗，但保持可读，提醒这条不会再注入给 AI */
+.mem-summary-item.mem-item-deprecated {
+    opacity: 0.55;
+}
+.mem-summary-item.mem-item-deprecated:hover {
+    opacity: 0.85;
 }
 
 .mem-summary-actions {
