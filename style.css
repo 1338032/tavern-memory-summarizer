@@ -162,6 +162,18 @@
     margin-top: -2px;
 }
 
+.mem-summarizer-panel .mem-wi-disabled-hint {
+    font-size: 0.82em;
+    opacity: 0.95;
+    line-height: 1.5;
+    color: #e0a05a;
+    background: rgba(220, 160, 50, 0.1);
+    border: 1px solid rgba(220, 160, 50, 0.35);
+    border-radius: var(--mem-radius-sm);
+    padding: 8px 10px;
+    margin-top: 2px;
+}
+
 .mem-status-line {
     display: flex;
     justify-content: space-between;
@@ -619,15 +631,18 @@
     flex-shrink: 0;
 }
 
-#mem-summary-pagination {
+#mem-summary-pagination,
+#mem-core-pagination {
     margin-top: 8px;
     margin-bottom: 4px;
 }
-#mem-summary-pagination .menu_button {
+#mem-summary-pagination .menu_button,
+#mem-core-pagination .menu_button {
     font-size: 0.85em;
     opacity: 0.8;
 }
-#mem-summary-pagination .menu_button:hover {
+#mem-summary-pagination .menu_button:hover,
+#mem-core-pagination .menu_button:hover {
     opacity: 1;
 }
 
@@ -736,9 +751,6 @@
     .mem-summarizer-panel .mem-inline {
         gap: 8px 14px;
     }
-    .mem-summary-actions .mem-wi-keys {
-        flex-basis: 100%;
-    }
     .mem-modal {
         padding: 14px;
     }
@@ -775,13 +787,17 @@
     font-size: 0.88em;
 }
 
-#mem-order-toggle span {
+#mem-order-toggle span,
+#mem-core-order-toggle span {
     font-size: 0.85em;
 }
 
 /* 手动添加记忆区域 */
 #mem-manual-add-text {
     min-height: 60px;
+}
+#mem-core-manual-add-text {
+    min-height: 44px;
 }
 
 /* 拖拽时的占位符 */

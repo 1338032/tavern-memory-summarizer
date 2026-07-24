@@ -41,6 +41,12 @@ let manualReminderCount = 0;
 let lastAddedSummaryId = null;
 let lastAddedCoreId = null;
 
+// 运行时状态（纯 UI，不持久化）：当前勾选了哪些长期记忆条目用于"提取核心"。
+// 单独用一个 Set 维护，而不是只依赖 DOM 里的 checkbox 状态，是因为筛选/排序/分页
+// 变化会重新生成整个列表的 innerHTML，勾选状态如果只存在 DOM 上就会丢失，
+// 用户体验会很差（勾了几条，切一下筛选条件，勾选全没了）。
+let selectedForCoreIds = new Set();
+
 // ------------------------ 默认配置 ------------------------
 const defaultSettings = {
     messagesPerSummary: 20,          // 每次总结发送的对话条数
@@ -52,20 +58,25 @@ const defaultSettings = {
     includeStyleReference: true,      // 总结时是否携带最近旧摘要作为风格参考
     styleReferenceCount: 3,           // 携带最近几条旧摘要
     autoInject: false,                // 是否自动注入到上下文（相当于引用到预设）
-    injectPosition: "IN_PROMPT",      // IN_PROMPT / IN_CHAT
-    injectDepth: 4,
-    injectRole: "system",             // system / user / assistant
-    injectCount: 3,                   // 注入时合并最近几条摘要
+    // 注入位置，4 档预设（内部映射到酒馆的 extension_prompt_types + depth，见 resolveInjectPositionType）：
+    // main_before = Main Prompt↑（主提示词之前）  main_after = Main Prompt↓（主提示词之后，原来的"主提示词内"）
+    // chat_top    = Chat History↑（聊天记录中靠前的位置，深度可调）
+    // chat_bottom = Chat History↓（聊天记录末尾，紧邻即将生成的回复之前，固定深度 0）
+    injectPosition: "main_after",
+    injectDepth: 4,                   // 仅 chat_top 时可调（chat_bottom 固定为 0）
+    injectRole: "system",             // system / user / assistant（仅 chat_top / chat_bottom 时生效）
+    injectCount: 3,                   // 自动注入时合并最近几条摘要
     panelOpen: false,                 // 记住面板展开/收起状态
     wiPosition: "",                   // 写入世界书时使用的插入位置键名（从当前酒馆版本动态探测）
     wiDepth: 4,                       // 位置为"指定深度"时使用
     wiRole: "system",                 // 位置为"指定深度"时使用：system / user / assistant
+    wiBookName: "",                   // 上次选择的目标世界书名，自动保存/恢复
     corePromptTemplate:
         "请从以下多段剧情摘要中提取核心记忆信息（如：角色生日、重要约定、" +
         "作息习惯、兴趣爱好、重要事件、关键物品、人物关系确认等永久性事实），" +
         "以简洁的条目列表形式输出，每条一行，只输出核心事实，" +
         "不要输出剧情经过或口水内容：\n\n{{content}}",
-    coreInjectCount: 5,               // 注入时合并最近几条核心记忆
+    coreInjectCount: 5,               // 自动注入时合并最近几条核心记忆
     summaryPageSize: 20,              // 长期记忆列表每页/默认显示条数
 
     // 面板"高级"折叠分组的展开/收起状态（仅影响 UI 显示，不影响任何数据）。
@@ -79,6 +90,26 @@ const defaultSettings = {
     filterMinChars: 0,                // 筛选：最小字数，0=不限
     filterMaxChars: 0,                // 筛选：最大字数，0=不限
     filterTimeRange: "all",           // 筛选：时间范围 "all" / "1h" / "24h" / "7d" / "30d"
+
+    // 核心记忆：筛选/顺序调整/分页，字段含义与上面长期记忆的同名字段完全一致，独立存储互不影响
+    coreOrder: "desc",
+    coreFilterMinChars: 0,
+    coreFilterMaxChars: 0,
+    coreFilterTimeRange: "all",
+    corePageSize: 20,
+
+    // 自定义注入提示词模板：核心记忆 / 长期记忆各一份，无论是"自动注入到上下文"还是
+    // "写入世界书"，都统一用这份模板包裹——同一类记忆永远只被同一份模板包一次，
+    // 且会先把该类全部记忆合并成一整块（每条一行），再整体套进模板里，不会逐条分散注入。
+    // 用 {{memories}} 代表合并后的记忆正文；如果模板里没写 {{memories}}，为避免内容被
+    // 静默丢弃，会自动把内容追加在模板末尾（见 applyTemplate）。模板里其余部分原样保留，
+    // 包括 {{user}}/{{char}} 这类酒馆自己的宏——本插件不处理它们，留给酒馆自己的宏系统解析。
+    injectTemplateSummary: "以下是关于{{user}}的过往剧情记忆，按时间整理：\n{{memories}}",
+    injectTemplateCore:
+        "以下是我关于{{user}}，一直放在心上的一些事：\n{{memories}}\n\n" +
+        "# 记忆应用\n" +
+        "以上是需要你始终牢记、不可违背或遗忘的核心事实。回复时请自然地运用这些信息，" +
+        "不要逐条复述或以列表形式念出来，也不要在明显不相关的话题下突兀地提起。",
 };
 
 // 每个"聊天"独立保存的数据（摘要内容 + 计数指针），存在 chat_metadata 里，
@@ -118,6 +149,12 @@ function getSettings() {
         if (extension_settings[MODULE_NAME][key] === undefined) {
             extension_settings[MODULE_NAME][key] = defaultSettings[key];
         }
+    }
+    // 迁移旧版本 injectPosition 的取值："IN_PROMPT"/"IN_CHAT" 是旧版仅有的两档，
+    // 现在扩展为 4 档预设，需要把旧设置映射到对应的新值，不能让老用户的设置失效。
+    const oldPositionMap = { IN_PROMPT: "main_after", IN_CHAT: "chat_top" };
+    if (oldPositionMap[extension_settings[MODULE_NAME].injectPosition]) {
+        extension_settings[MODULE_NAME].injectPosition = oldPositionMap[extension_settings[MODULE_NAME].injectPosition];
     }
     return extension_settings[MODULE_NAME];
 }
@@ -165,6 +202,20 @@ function escapeHtml(str) {
         .replace(/>/g, "&gt;")
         .replace(/"/g, "&quot;")
         .replace(/'/g, "&#39;");
+}
+
+// 把 content 套进用户自定义的模板里。用于：总结提示词、核心记忆提取提示词、
+// 两种注入模板。统一走这一个函数，避免每处各写一套替换逻辑、行为不一致。
+// 安全兜底：如果用户编辑模板时手滑删掉了 {{content}} 占位符，直接 replace 会导致
+// 内容被静默丢弃（模板本身原样发出，AI 收不到任何实际内容却不会报错，很难发现）。
+// 这里改为：找不到占位符时，把内容追加在模板末尾，保证内容永远不会丢，
+// 只是提示词的措辞可能没有严格按用户预期的位置摆放。
+function applyTemplate(template, content, placeholder = "{{content}}") {
+    const t = String(template ?? "");
+    if (t.includes(placeholder)) {
+        return t.split(placeholder).join(content);
+    }
+    return t.trim() ? `${t}\n\n${content}` : content;
 }
 
 function formatMessagesForPrompt(messages) {
@@ -311,7 +362,7 @@ function buildFinalPrompt(newContent) {
             "\n\n【下面才是需要你总结的新内容，请只输出这段新内容对应的摘要正文】：\n\n";
     }
 
-    return prefix + s.promptTemplate.replace("{{content}}", newContent);
+    return prefix + applyTemplate(s.promptTemplate, newContent);
 }
 
 // ------------------------ 核心：生成总结 ------------------------
@@ -409,6 +460,7 @@ async function runSummarization(manual = false) {
         const entry = {
             id: `${Date.now()}`,
             time: new Date().toLocaleString(), // 这条摘要真实的生成完成时间，用于条目右上角显示
+            timestamp: Date.now(),             // 数字时间戳，用于时间筛选（locale 字符串在部分浏览器下无法被 Date 解析回去）
             range: [startIdx, endIdx],
             content: trimmed,
             auto: !manual,
@@ -437,6 +489,28 @@ async function runSummarization(manual = false) {
 
 // ------------------------ 自动注入到上下文 ------------------------
 
+// 把面板里的 4 档位置预设，翻译成酒馆 setExtensionPrompt 需要的 {type, depth}。
+// main_before / main_after 对应酒馆的 BEFORE_PROMPT / IN_PROMPT，depth 对这两种类型无意义，固定传 0。
+// chat_top / chat_bottom 都对应 IN_CHAT（聊天记录中按深度插入）：
+//   chat_bottom 固定深度 0（紧邻"即将生成的回复"之前，即聊天记录末尾）；
+//   chat_top 使用用户在面板里设置的 injectDepth（越大越靠聊天记录前面）。
+// 兼容性兜底：BEFORE_PROMPT 是酒馆较新版本才有的类型，如果当前酒馆版本没有这个常量
+// （extension_prompt_types.BEFORE_PROMPT 为 undefined），退回到 IN_PROMPT，不让注入直接失效。
+function resolveInjectPositionType(positionKey) {
+    const beforePrompt = extension_prompt_types.BEFORE_PROMPT ?? extension_prompt_types.IN_PROMPT;
+    switch (positionKey) {
+        case "main_before": return beforePrompt;
+        case "chat_top":
+        case "chat_bottom": return extension_prompt_types.IN_CHAT;
+        case "main_after":
+        default: return extension_prompt_types.IN_PROMPT;
+    }
+}
+function resolveInjectDepth(positionKey, depthSetting) {
+    if (positionKey === "chat_top") return Number.isFinite(depthSetting) ? depthSetting : 0;
+    return 0; // main_before / main_after / chat_bottom 都固定为 0（后两者类型本身就不需要深度）
+}
+
 function updateInjection() {
     const settings = getSettings();
     const context = getContext();
@@ -447,37 +521,32 @@ function updateInjection() {
         return;
     }
 
-    const recentCore = (data.coreMemories || []).slice(-settings.coreInjectCount);
-    // 注入时也遵循用户设置的顺序
-    const orderedForInject = settings.summaryOrder === "asc"
-        ? data.summaries.slice()
-        : data.summaries.slice().reverse();
-    const recentSummary = orderedForInject.slice(0, settings.injectCount);
+    // 注入时遵循各自的显示顺序设置（核心记忆现在也支持拖拽调整顺序，
+    // 所以和长期记忆一样，"最近 N 条"要按当前排序设置来取，而不是总取存储数组的末尾，
+    // 否则用户手动拖拽调整过顺序后，注入的条目会和面板上看到的顺序对不上）。
+    const orderedCore = getOrderedCores(data.coreMemories || []);
+    const recentCore = orderedCore.slice(0, settings.coreInjectCount);
+    const orderedSummary = getOrderedSummaries(data.summaries);
+    const recentSummary = orderedSummary.slice(0, settings.injectCount);
 
     if (recentCore.length === 0 && recentSummary.length === 0) {
         context.setExtensionPrompt(MODULE_NAME, "", extension_prompt_types.IN_PROMPT, 0);
         return;
     }
 
+    // 核心记忆和长期记忆分别合并为一整块（每条一行），再各自套进专属的注入模板里——
+    // 保证同一类记忆永远只被自己的模板包一次，不会出现"记忆条目分散、模板触发多次"的情况。
     const parts = [];
     if (recentCore.length > 0) {
-        parts.push(
-            "【核心记忆（绝对优先，不可违反、不可遗忘）】\n" +
-            recentCore.map((c) => `- ${c.content}`).join("\n")
-        );
+        const coreContent = recentCore.map((c) => `- ${c.content}`).join("\n");
+        parts.push(applyTemplate(settings.injectTemplateCore, coreContent, "{{memories}}"));
     }
     if (recentSummary.length > 0) {
-        parts.push(
-            "【剧情记忆摘要】\n" +
-            recentSummary.map((s) => `- ${s.content}`).join("\n")
-        );
+        const summaryContent = recentSummary.map((s) => `- ${s.content}`).join("\n");
+        parts.push(applyTemplate(settings.injectTemplateSummary, summaryContent, "{{memories}}"));
     }
     const combined = parts.join("\n\n");
 
-    const positionMap = {
-        IN_PROMPT: extension_prompt_types.IN_PROMPT,
-        IN_CHAT: extension_prompt_types.IN_CHAT,
-    };
     const roleMap = {
         system: extension_prompt_roles.SYSTEM,
         user: extension_prompt_roles.USER,
@@ -487,8 +556,8 @@ function updateInjection() {
     context.setExtensionPrompt(
         MODULE_NAME,
         combined,
-        positionMap[settings.injectPosition] ?? extension_prompt_types.IN_PROMPT,
-        settings.injectDepth,
+        resolveInjectPositionType(settings.injectPosition),
+        resolveInjectDepth(settings.injectPosition, settings.injectDepth),
         false,
         roleMap[settings.injectRole] ?? extension_prompt_roles.SYSTEM
     );
@@ -537,7 +606,7 @@ async function runCoreSummarization(selectedIds) {
             throw new Error("当前酒馆版本未找到 generateQuietPrompt 接口");
         }
 
-        const prompt = settings.corePromptTemplate.replace("{{content}}", combinedContent);
+        const prompt = applyTemplate(settings.corePromptTemplate, combinedContent);
         const result = await context.generateQuietPrompt(prompt, false, false);
 
         const freshContext = getContext();
@@ -555,6 +624,7 @@ async function runCoreSummarization(selectedIds) {
         const coreEntry = {
             id: `core-${Date.now()}`,
             time: new Date().toLocaleString(),
+            timestamp: Date.now(),
             content: trimmed,
             sourceIds: selectedIds.slice(),
         };
@@ -585,6 +655,7 @@ async function runCoreSummarization(selectedIds) {
             const mergedEntry = {
                 id: `merged-${Date.now()}`,
                 time: new Date().toLocaleString(),
+                timestamp: Date.now(),
                 range: [
                     Math.min(...selectedEntries.map((s) => s.range?.[0] ?? 0)),
                     Math.max(...selectedEntries.map((s) => s.range?.[1] ?? 0)),
@@ -600,6 +671,10 @@ async function runCoreSummarization(selectedIds) {
             // 删除：直接移除原始条目，lastSummarizedIndex 不变
             data.summaries = data.summaries.filter((s) => !selectedIds.includes(s.id));
         }
+
+        // 这些 id 已经被消费（合并或删除），把它们从"已勾选"记忆里清掉，
+        // 避免残留在 selectedForCoreIds 里（虽然无害，但保持状态干净）
+        for (const id of selectedIds) selectedForCoreIds.delete(id);
 
         saveChatData();
         toastSuccess("核心记忆提取完成");
@@ -670,6 +745,19 @@ function toggleWiAtDepthRow() {
     row.style.display = select.value === "atDepth" ? "flex" : "none";
 }
 
+// 注入位置的深度/角色行，只有选中 Chat History↑/↓ 两档时才有意义（Main Prompt↑/↓ 不涉及深度）。
+// 深度数字本身只对 Chat History↑ 生效，Chat History↓ 固定深度为 0（见 resolveInjectDepth），
+// 这里额外把输入框在 Chat History↓ 时禁用掉，避免用户误以为改这个数字有效果。
+function toggleInjectPositionSubrow() {
+    const row = document.getElementById("mem-inject-subrow");
+    const select = document.getElementById("mem-inject-pos");
+    const depthInput = document.getElementById("mem-inject-depth");
+    if (!row || !select) return;
+    const isChatBased = select.value === "chat_top" || select.value === "chat_bottom";
+    row.style.display = isChatBased ? "flex" : "none";
+    if (depthInput) depthInput.disabled = select.value !== "chat_top";
+}
+
 async function writeToWorldInfo(bookName, content, keysStr, positionKey, depth, role) {
     if (!WI_API) {
         toastError("世界书接口未加载成功，无法直接写入，请使用复制按钮手动粘贴");
@@ -720,17 +808,52 @@ async function writeToWorldInfo(bookName, content, keysStr, positionKey, depth, 
     }
 }
 
-// 点击"写入世界书"按钮的入口：先弹出预览确认框，用户确认之后才真正写入。
-async function openWiWritePreview(entry, triggerBtn) {
+// 写入世界书 / 自动注入到上下文，两者都会把同一份"合并 + 模板包裹"的记忆内容喂给 AI。
+// 如果两个都开着，AI 会在一次生成里看到两份重复的记忆（一份在预设里、一份在世界书里），
+// 白白多花 token 还可能让 AI 犯迷糊，所以两者互斥：开着"自动注入到上下文"时，
+// 写入世界书的两个按钮会被禁用，并显示提示，引导用户先关掉自动注入。
+function updateWiWriteAvailability() {
+    const settings = getSettings();
+    const disabled = !!settings.autoInject;
+    const btnSummary = document.getElementById("mem-wi-write-summary");
+    const btnCore = document.getElementById("mem-wi-write-core");
+    const hint = document.getElementById("mem-wi-disabled-hint");
+    if (btnSummary) btnSummary.disabled = disabled;
+    if (btnCore) btnCore.disabled = disabled;
+    if (hint) hint.style.display = disabled ? "" : "none";
+    return disabled;
+}
+
+// 点击"写入长期记忆"/"写入核心记忆"按钮的入口：把该类全部记忆合并成一条、
+// 套上专属注入模板，预览确认后作为一条新的世界书条目写入。
+// kind: "summary"（长期记忆）| "core"（核心记忆）
+async function writeMergedMemoryToWorldInfo(kind, triggerBtn) {
     const s = getSettings();
+    if (s.autoInject) {
+        toastError('已开启"自动注入到上下文"，请先在"注入设置"里关闭它，再使用写入世界书功能，避免同一份记忆被重复喂给 AI');
+        return;
+    }
     const bookSelect = document.getElementById("mem-wi-book");
     const bookName = bookSelect?.value;
     if (!bookName) {
         toastError("请先选择一个世界书");
         return;
     }
-    const list = document.getElementById("mem-summary-list");
-    const keysInput = list?.querySelector(`.mem-wi-keys[data-id="${entry.id}"]`);
+
+    const data = getChatData();
+    const isCore = kind === "core";
+    const rawList = isCore ? (data.coreMemories || []) : data.summaries;
+    if (rawList.length === 0) {
+        toastInfo(isCore ? "当前没有核心记忆可写入" : "当前没有长期记忆可写入");
+        return;
+    }
+
+    const ordered = isCore ? getOrderedCores(rawList) : getOrderedSummaries(rawList);
+    const merged = ordered.map((x) => `- ${x.content}`).join("\n");
+    const template = isCore ? s.injectTemplateCore : s.injectTemplateSummary;
+    const finalContent = applyTemplate(template, merged, "{{memories}}");
+
+    const keysInput = document.getElementById(isCore ? "mem-wi-keys-core" : "mem-wi-keys-summary");
     const keys = (keysInput?.value || "")
         .split(",")
         .map((x) => x.trim())
@@ -746,32 +869,29 @@ async function openWiWritePreview(entry, triggerBtn) {
         <div class="mem-modal-line">目标世界书：<b>${escapeHtml(bookName)}</b></div>
         <div class="mem-modal-line">插入位置：${escapeHtml(positionLabel)}</div>
         <div class="mem-modal-line">关键词：${keys.length ? escapeHtml(keys.join("、")) : "（留空，将设为常驻条目）"}</div>
-        <div class="mem-modal-line">内容预览（共 ${entry.content.length} 字）：</div>
-        <textarea class="mem-preview-textarea" readonly>${escapeHtml(entry.content)}</textarea>
+        <div class="mem-modal-line">已合并 <b>${ordered.length}</b> 条${isCore ? "核心记忆" : "长期记忆"}，用${isCore ? "核心记忆" : "长期记忆"}注入模板包裹后，共 ${finalContent.length} 字：</div>
+        <textarea class="mem-preview-textarea" readonly>${escapeHtml(finalContent)}</textarea>
+        <div class="mem-modal-line" style="margin-top:10px">⚠️ 这会创建一条<b>新的</b>世界书条目，不会更新或覆盖已有条目。如果你之前已经写入过，请记得去世界书里手动删除旧的那一条，避免同一份记忆重复存在、越堆越多，也避免 AI 看到自相矛盾的新旧版本。</div>
     `;
 
     if (triggerBtn) triggerBtn.disabled = true;
     try {
         const confirmed = await showModal({
-            title: "写入世界书前确认",
+            title: `写入${isCore ? "核心" : "长期"}记忆到世界书前确认`,
             bodyHtml,
             confirmText: "确认写入",
             cancelText: "取消",
         });
         if (!confirmed) return;
 
-        // 弹窗展示期间聊天/摘要状态可能已经变化（比如这条摘要被删除了），
-        // 真正写入之前用 id 重新取一次最新内容，避免写入过期或不存在的数据。
-        const freshData = getChatData();
-        const fresh = freshData.summaries.find((x) => x.id === entry.id);
-        if (!fresh) {
-            toastError("这条总结已被删除，写入已取消");
-            return;
-        }
-
-        await writeToWorldInfo(bookName, fresh.content, keysInput?.value, s.wiPosition, s.wiDepth, s.wiRole);
+        await writeToWorldInfo(bookName, finalContent, keysInput?.value, s.wiPosition, s.wiDepth, s.wiRole);
+    } catch (e) {
+        // 兜底：理论上 writeToWorldInfo 自己已经 try/catch 过了，这里只是双保险，
+        // 防止 showModal 的 onConfirm 逻辑本身出意外时变成未处理的 Promise 拒绝。
+        console.error("[记忆总结助手] 写入世界书流程异常：", e);
+        toastError(`写入世界书失败：${extractErrorReason(e)}`);
     } finally {
-        if (triggerBtn) triggerBtn.disabled = false;
+        if (triggerBtn) triggerBtn.disabled = updateWiWriteAvailability();
     }
 }
 
@@ -952,6 +1072,7 @@ async function importDataFromFile(file) {
                 data.coreMemories.push({
                     id,
                     time: typeof raw.time === "string" && raw.time ? raw.time : new Date().toLocaleString(),
+                    timestamp: Number.isFinite(raw.timestamp) ? raw.timestamp : undefined,
                     content: String(raw.content),
                     sourceIds: Array.isArray(raw.sourceIds) ? raw.sourceIds : [],
                 });
@@ -973,6 +1094,7 @@ async function importDataFromFile(file) {
                 data.summaries.push({
                     id,
                     time: typeof raw.time === "string" && raw.time ? raw.time : new Date().toLocaleString(),
+                    timestamp: Number.isFinite(raw.timestamp) ? raw.timestamp : undefined,
                     range: Array.isArray(raw.range) && raw.range.length === 2 ? raw.range : [0, 0],
                     content: String(raw.content),
                     auto: !!raw.auto,
@@ -1031,12 +1153,25 @@ function syncSettingsToForm() {
     setVal("mem-inject-depth", s.injectDepth);
     setVal("mem-inject-role", s.injectRole);
     setVal("mem-inject-n", s.injectCount);
+    setVal("mem-inject-template-summary", s.injectTemplateSummary);
+    setVal("mem-inject-template-core", s.injectTemplateCore);
     setVal("mem-wi-depth", s.wiDepth);
     setVal("mem-wi-role", s.wiRole);
     setVal("mem-core-prompt", s.corePromptTemplate);
     setVal("mem-core-inject-n", s.coreInjectCount);
+    setVal("mem-filter-time", s.filterTimeRange);
+    setVal("mem-filter-min", s.filterMinChars);
+    setVal("mem-filter-max", s.filterMaxChars);
+    setVal("mem-core-filter-time", s.coreFilterTimeRange);
+    setVal("mem-core-filter-min", s.coreFilterMinChars);
+    setVal("mem-core-filter-max", s.coreFilterMaxChars);
+    updateOrderToggleButton("mem-order-toggle", s.summaryOrder);
+    updateOrderToggleButton("mem-core-order-toggle", s.coreOrder);
+    populateWorldBookSelect();
     populateWiPositionSelect();
     toggleWiAtDepthRow();
+    toggleInjectPositionSubrow();
+    updateWiWriteAvailability();
 }
 
 // ------------------------ UI 渲染 ------------------------
@@ -1102,11 +1237,16 @@ function buildPanelHtml() {
         <div class="mem-row mem-inline">
             <label>位置：
                 <select id="mem-inject-pos">
-                    <option value="IN_PROMPT" ${s.injectPosition === "IN_PROMPT" ? "selected" : ""}>主提示词内</option>
-                    <option value="IN_CHAT" ${s.injectPosition === "IN_CHAT" ? "selected" : ""}>聊天记录中(按深度)</option>
+                    <option value="main_before" ${s.injectPosition === "main_before" ? "selected" : ""}>Main Prompt↑（主提示词之前）</option>
+                    <option value="main_after" ${s.injectPosition === "main_after" ? "selected" : ""}>Main Prompt↓（主提示词之后）</option>
+                    <option value="chat_top" ${s.injectPosition === "chat_top" ? "selected" : ""}>Chat History↑（聊天记录较前，深度可调）</option>
+                    <option value="chat_bottom" ${s.injectPosition === "chat_bottom" ? "selected" : ""}>Chat History↓（聊天记录末尾，紧邻回复前）</option>
                 </select>
             </label>
-            <label>深度：<input type="number" id="mem-inject-depth" min="0" value="${s.injectDepth}" style="width:60px"/></label>
+            <label>合并最近：<input type="number" id="mem-inject-n" min="1" value="${s.injectCount}" style="width:50px"/> 条</label>
+        </div>
+        <div class="mem-row mem-inline mem-wi-subrow" id="mem-inject-subrow" style="display:none">
+            <label>深度：<input type="number" id="mem-inject-depth" min="0" value="${s.injectDepth}" style="width:60px" title="仅 Chat History↑ 可调；Chat History↓ 固定为 0"/></label>
             <label>角色：
                 <select id="mem-inject-role">
                     <option value="system" ${s.injectRole === "system" ? "selected" : ""}>系统</option>
@@ -1114,17 +1254,31 @@ function buildPanelHtml() {
                     <option value="assistant" ${s.injectRole === "assistant" ? "selected" : ""}>AI</option>
                 </select>
             </label>
-            <label>合并最近：<input type="number" id="mem-inject-n" min="1" value="${s.injectCount}" style="width:50px"/> 条</label>
         </div>
         <div class="mem-hint">
             注意：生成新摘要时会临时关闭这里的注入，避免总结这次新内容时把刚注入的旧摘要又重复喂给 AI 一次；
             总结完成后会自动恢复，不影响正常聊天。
+        </div>
+        <div class="mem-row" style="margin-top:6px">
+            <label>长期记忆注入模板（用 {{memories}} 代表合并后的长期记忆正文，每条一行）：</label>
+            <textarea id="mem-inject-template-summary" rows="3">${escapeHtml(s.injectTemplateSummary)}</textarea>
+        </div>
+        <div class="mem-row">
+            <label>核心记忆注入模板（用 {{memories}} 代表合并后的核心记忆正文，每条一行）：</label>
+            <textarea id="mem-inject-template-core" rows="4">${escapeHtml(s.injectTemplateCore)}</textarea>
+        </div>
+        <div class="mem-hint">
+            两份模板分别对应"核心记忆"和"长期记忆"，全部记忆会先各自合并成一整块再套进模板，
+            不会逐条分散注入、也不会同一份模板重复触发；模板里的 {{user}}/{{char}} 等酒馆宏会
+            由酒馆自己解析。修改会自动保存，且同时应用于"自动注入到上下文"和"写入世界书"。
+            如果模板里删掉了 {{memories}}，为避免内容丢失，插件会自动把内容追加在模板末尾。
         </div>`;
 
     // ------ 世界书 ------
     const worldbookSectionHtml = `
         <div class="mem-row">
-            <label>写入世界书（每条总结下方都有单独按钮，点击后会先预览确认，不会自动写入）：</label>
+            <label>写入世界书：会把当前<b>全部</b>长期记忆合并为一条、全部核心记忆合并为一条，
+                各自用上面"注入设置"里的专属模板包裹后写入，不会逐条写入。</label>
         </div>
         <div class="mem-row mem-inline">
             <label>目标世界书：
@@ -1147,8 +1301,23 @@ function buildPanelHtml() {
                 </select>
             </label>
         </div>
+        <div class="mem-row mem-inline">
+            <label style="flex:1;min-width:150px">长期记忆关键词：<input type="text" id="mem-wi-keys-summary" class="mem-wi-keys" placeholder="逗号分隔，留空=常驻"/></label>
+            <label style="flex:1;min-width:150px">核心记忆关键词：<input type="text" id="mem-wi-keys-core" class="mem-wi-keys" placeholder="逗号分隔，留空=常驻"/></label>
+        </div>
+        <div class="mem-row mem-inline">
+            <button id="mem-wi-write-summary" class="menu_button"><i class="fa-solid fa-book"></i> 写入长期记忆</button>
+            <button id="mem-wi-write-core" class="menu_button mem-btn-core"><i class="fa-solid fa-gem"></i> 写入核心记忆</button>
+        </div>
+        <div class="mem-hint mem-wi-disabled-hint" id="mem-wi-disabled-hint" style="display:none">
+            ⚠️ 已开启"自动注入到上下文"，为避免同一份记忆被重复喂给 AI（预设里一份、世界书里又一份），
+            写入世界书功能已暂时禁用。如果想改用世界书而不是自动注入，请先在上面"注入设置"里关闭
+            "自动注入到上下文"。
+        </div>
         <div class="mem-hint">
-            完全不想用世界书的话，用下面"长期记忆"里的"复制全部总结"手动粘贴到你需要的地方即可，不点"写入世界书"就不会有任何自动写入行为。
+            每次点击都会创建一条<b>新的</b>世界书条目，不会更新或覆盖已有条目——如果之前写过，
+            记得先去世界书里手动删掉旧的那条，避免同一份记忆越堆越多、AI 看到自相矛盾的新旧版本。
+            完全不想用世界书的话，用下面"长期记忆"里的"复制全部总结"手动粘贴到你需要的地方即可。
         </div>`;
 
     // ------ 长期记忆（内含"核心记忆"、"长期记忆列表"两张分类样式卡） ------
@@ -1157,7 +1326,7 @@ function buildPanelHtml() {
             <div class="mem-subsection-title"><i class="fa-solid fa-gem"></i> 核心记忆</div>
             <div class="mem-hint">
                 核心记忆的优先级高于长期记忆，注入时会标记为"绝对不可违反"。
-                从下方长期记忆列表中勾选条目，然后点击"提取核心"按钮。
+                从下方长期记忆列表中勾选条目，然后点击"提取核心"按钮，也可以直接手动添加。
             </div>
             <div class="mem-row">
                 <label>核心记忆提取提示词（用 {{content}} 代表选中的摘要内容）：</label>
@@ -1167,7 +1336,37 @@ function buildPanelHtml() {
                 <label>注入最近核心记忆条数：<input type="number" id="mem-core-inject-n" min="1" value="${s.coreInjectCount}" style="width:60px"/></label>
             </div>
             <div id="mem-core-status" class="mem-row mem-status"></div>
+
+            <div class="mem-row">
+                <textarea id="mem-core-manual-add-text" rows="2" placeholder="在这里输入要手动添加的核心记忆内容…"></textarea>
+            </div>
+            <div class="mem-row mem-inline">
+                <button id="mem-core-manual-add-btn" class="menu_button mem-btn-primary"><i class="fa-solid fa-plus"></i> 手动添加核心记忆</button>
+            </div>
+
+            <div class="mem-row mem-inline mem-filter-bar">
+                <label>时间：
+                    <select id="mem-core-filter-time">
+                        <option value="all"${s.coreFilterTimeRange === "all" ? " selected" : ""}>全部</option>
+                        <option value="1h"${s.coreFilterTimeRange === "1h" ? " selected" : ""}>最近1小时</option>
+                        <option value="24h"${s.coreFilterTimeRange === "24h" ? " selected" : ""}>最近24小时</option>
+                        <option value="7d"${s.coreFilterTimeRange === "7d" ? " selected" : ""}>最近7天</option>
+                        <option value="30d"${s.coreFilterTimeRange === "30d" ? " selected" : ""}>最近30天</option>
+                    </select>
+                </label>
+                <label>字数≥<input type="number" id="mem-core-filter-min" min="0" value="${s.coreFilterMinChars}" style="width:55px"/></label>
+                <label>字数≤<input type="number" id="mem-core-filter-max" min="0" value="${s.coreFilterMaxChars}" style="width:55px" placeholder="0=不限"/></label>
+                <button id="mem-core-order-toggle" class="menu_button" title="切换显示/注入顺序">
+                    <i class="fa-solid ${s.coreOrder === "desc" ? "fa-arrow-down-wide-short" : "fa-arrow-up-wide-short"}"></i>
+                    <span>${s.coreOrder === "desc" ? "倒序(新→旧)" : "正序(旧→新)"}</span>
+                </button>
+            </div>
+            <div class="mem-hint">
+                排序会同时影响面板显示和注入给 AI 的上下文顺序；长按某条核心记忆可拖动调整顺序（自动保存）。筛选仅影响面板显示，不影响注入。
+            </div>
+
             <div id="mem-core-list" class="mem-summary-list"></div>
+            <div id="mem-core-pagination" class="mem-row mem-inline" style="justify-content:center"></div>
         </div>
 
         <div class="mem-subsection mem-subsection-longterm">
@@ -1286,26 +1485,32 @@ function buildSummaryItemHtml(entry) {
         ? '<span class="mem-badge mem-badge-auto"><i class="fa-solid fa-robot"></i> 自动</span>'
         : '<span class="mem-badge mem-badge-manual"><i class="fa-solid fa-hand"></i> 手动</span>';
     const charCount = (entry.content || "").length;
-    const rangeStart = Array.isArray(entry.range) ? entry.range[0] + 1 : "?";
-    const rangeEnd = Array.isArray(entry.range) ? entry.range[1] : "?";
+    const hasRealRange = Array.isArray(entry.range) && (entry.range[0] !== 0 || entry.range[1] !== 0);
+    // 手动添加的记忆没有真实的消息范围（约定用 [0,0] 占位），显示"消息 1-0"会让人以为是个 bug，
+    // 这里改为显示更直观的"手动添加"提示。
+    const rangeLabel = hasRealRange
+        ? `消息 ${entry.range[0] + 1}-${entry.range[1]}`
+        : "手动添加";
     // 刚生成的这一条播放一次入场动画，之后（比如编辑了别的条目触发整表重渲染）不会再重复播放。
     const isNew = entry.id === lastAddedSummaryId;
+    // entry.id 在"导入数据"场景下来自外部 JSON 文件，不可信，拼进 HTML 属性前必须转义，
+    // 否则精心构造的 id（比如含有引号）可以逃出属性、注入任意标签/脚本。
+    const safeId = escapeHtml(entry.id);
+    const checked = selectedForCoreIds.has(entry.id) ? " checked" : "";
     return `
-    <div class="mem-summary-item${isNew ? " mem-item-new" : ""}" data-id="${entry.id}">
+    <div class="mem-summary-item${isNew ? " mem-item-new" : ""}" data-id="${safeId}">
         <div class="mem-summary-header">
             <div class="mem-summary-header-left">
-                <input type="checkbox" class="mem-select-for-core" data-id="${entry.id}" title="选中以提取核心记忆" />
+                <input type="checkbox" class="mem-select-for-core" data-id="${safeId}"${checked} title="选中以提取核心记忆" />
                 ${badge}
-                <span>消息 ${rangeStart}-${rangeEnd} · ${charCount} 字</span>
+                <span>${rangeLabel} · ${charCount} 字</span>
             </div>
             <div class="mem-summary-time" title="真实的总结完成时间">${escapeHtml(entry.time)}</div>
         </div>
-        <textarea class="mem-summary-text" data-id="${entry.id}" rows="3">${escapeHtml(entry.content)}</textarea>
+        <textarea class="mem-summary-text" data-id="${safeId}" rows="3">${escapeHtml(entry.content)}</textarea>
         <div class="mem-summary-actions">
-            <input type="text" class="mem-wi-keys" data-id="${entry.id}" placeholder="世界书关键词(逗号分隔，留空=常驻)" />
-            <button class="menu_button mem-write-wi" data-id="${entry.id}"><i class="fa-solid fa-book"></i> 写入世界书</button>
-            <button class="menu_button mem-copy-one" data-id="${entry.id}"><i class="fa-solid fa-copy"></i> 复制</button>
-            <button class="menu_button mem-delete-one danger" data-id="${entry.id}"><i class="fa-solid fa-trash"></i> 删除</button>
+            <button class="menu_button mem-copy-one" data-id="${safeId}"><i class="fa-solid fa-copy"></i> 复制</button>
+            <button class="menu_button mem-delete-one danger" data-id="${safeId}"><i class="fa-solid fa-trash"></i> 删除</button>
         </div>
     </div>
     `;
@@ -1314,8 +1519,9 @@ function buildSummaryItemHtml(entry) {
 function buildCoreMemoryItemHtml(entry) {
     const charCount = (entry.content || "").length;
     const isNew = entry.id === lastAddedCoreId;
+    const safeId = escapeHtml(entry.id); // 同上：来自导入文件的 id 不可信，必须转义
     return `
-    <div class="mem-summary-item mem-core-item${isNew ? " mem-item-new" : ""}" data-id="${entry.id}">
+    <div class="mem-summary-item mem-core-item${isNew ? " mem-item-new" : ""}" data-id="${safeId}">
         <div class="mem-summary-header">
             <div class="mem-summary-header-left">
                 <span class="mem-badge mem-badge-core">核心</span>
@@ -1323,20 +1529,26 @@ function buildCoreMemoryItemHtml(entry) {
             </div>
             <div class="mem-summary-time" title="真实的总结完成时间">${escapeHtml(entry.time)}</div>
         </div>
-        <textarea class="mem-core-text" data-id="${entry.id}" rows="3">${escapeHtml(entry.content)}</textarea>
+        <textarea class="mem-core-text" data-id="${safeId}" rows="3">${escapeHtml(entry.content)}</textarea>
         <div class="mem-summary-actions">
-            <button class="menu_button mem-core-copy" data-id="${entry.id}"><i class="fa-solid fa-copy"></i> 复制</button>
-            <button class="menu_button mem-core-delete danger" data-id="${entry.id}"><i class="fa-solid fa-trash"></i> 删除</button>
+            <button class="menu_button mem-core-copy" data-id="${safeId}"><i class="fa-solid fa-copy"></i> 复制</button>
+            <button class="menu_button mem-core-delete danger" data-id="${safeId}"><i class="fa-solid fa-trash"></i> 删除</button>
         </div>
     </div>
     `;
 }
 
+// 运行时状态：长期记忆 / 核心记忆列表是否已展开全部
+let summaryShowAll = false;
+let coreShowAll = false;
+
 function renderCoreMemories() {
     const coreList = document.getElementById("mem-core-list");
     const coreStatus = document.getElementById("mem-core-status");
+    const paginationDiv = document.getElementById("mem-core-pagination");
     if (!coreList) return;
     const data = getChatData();
+    const settings = getSettings();
     const cores = data.coreMemories || [];
 
     if (coreStatus) {
@@ -1348,41 +1560,69 @@ function renderCoreMemories() {
     }
 
     if (cores.length === 0) {
-        coreList.innerHTML = `<div class="mem-empty-hint">暂无核心记忆，从下方长期记忆中勾选条目后点击"提取核心"</div>`;
+        coreList.innerHTML = `<div class="mem-empty-hint">暂无核心记忆，可以从下方长期记忆中勾选条目后点击"提取核心"，也可以直接手动添加</div>`;
+        if (paginationDiv) paginationDiv.innerHTML = "";
         lastAddedCoreId = null;
         return;
     }
-    coreList.innerHTML = cores.slice().reverse().map(buildCoreMemoryItemHtml).join("");
+
+    // 和长期记忆列表一样：先筛选，再排序，再分页
+    const filtered = getFilteredCores();
+    const ordered = getOrderedCores(filtered);
+    const pageSize = settings.corePageSize || 20;
+    const total = ordered.length;
+
+    if (total === 0) {
+        coreList.innerHTML = `<div class="mem-empty-hint">没有符合当前筛选条件的核心记忆（共 ${cores.length} 条）</div>`;
+        if (paginationDiv) paginationDiv.innerHTML = "";
+        lastAddedCoreId = null;
+        return;
+    }
+
+    if (total <= pageSize || coreShowAll) {
+        coreList.innerHTML = ordered.map(buildCoreMemoryItemHtml).join("");
+        if (paginationDiv) {
+            if (total > pageSize && coreShowAll) {
+                paginationDiv.innerHTML = `<button id="mem-core-show-less" class="menu_button"><i class="fa-solid fa-chevron-up"></i> 收起，只显示最近 ${pageSize} 条</button>`;
+            } else {
+                paginationDiv.innerHTML = "";
+            }
+        }
+    } else {
+        coreList.innerHTML = ordered.slice(0, pageSize).map(buildCoreMemoryItemHtml).join("");
+        if (paginationDiv) {
+            paginationDiv.innerHTML = `<button id="mem-core-show-all" class="menu_button"><i class="fa-solid fa-chevron-down"></i> 还有 ${total - pageSize} 条，点击展开全部</button>`;
+        }
+    }
     lastAddedCoreId = null;
 }
 
-// 运行时状态：长期记忆列表是否已展开全部
-let summaryShowAll = false;
-
-// 解析条目的 time 字符串为毫秒时间戳，解析失败返回 0
+// 解析条目的时间为毫秒时间戳，解析失败返回 0。
+// 优先使用数字 timestamp 字段（新条目都会写入这个字段，不受 locale 影响，稳定可靠）；
+// 老数据/旧版本导入的条目没有这个字段时，才退回到解析 time 字符串——
+// 但 entry.time 是 toLocaleString() 产生的，格式因系统语言/浏览器而异，
+// 部分浏览器（尤其非 Chromium 内核）对这种格式解析不稳定，只能作为兜底，不保证一定成功。
 function parseEntryTime(entry) {
-    if (!entry || !entry.time) return 0;
-    // entry.time 是 new Date().toLocaleString() 产生的，格式因系统语言不同而不同，
-    // 但 Date 构造函数对大部分常见 locale 格式都能解析。
+    if (!entry) return 0;
+    if (Number.isFinite(entry.timestamp)) return entry.timestamp;
+    if (!entry.time) return 0;
     const t = new Date(entry.time).getTime();
     return Number.isFinite(t) ? t : 0;
 }
 
-// 根据当前筛选设置，返回应该在面板里显示的 summaries 子集（不修改原数组）
-function getFilteredSummaries() {
-    const s = getSettings();
-    const data = getChatData();
-    let items = data.summaries.slice(); // 浅拷贝，不动原数据
+// 通用筛选：按时间范围 + 字数区间过滤一个条目数组（不修改原数组）。
+// 长期记忆和核心记忆共用这一份逻辑，只是各自传入自己的筛选设置。
+function filterEntriesByTimeAndChars(list, timeRange, minChars, maxChars) {
+    let items = (list || []).slice();
 
-    // 时间筛选
-    if (s.filterTimeRange && s.filterTimeRange !== "all") {
+    if (timeRange && timeRange !== "all") {
         const now = Date.now();
         const rangeMs = {
             "1h": 3600_000,
             "24h": 86400_000,
             "7d": 604800_000,
             "30d": 2592000_000,
-        }[s.filterTimeRange];
+        }[timeRange];
         if (rangeMs) {
             items = items.filter((x) => {
                 const t = parseEntryTime(x);
@@ -1391,9 +1631,8 @@ function getFilteredSummaries() {
         }
     }
 
-    // 字数筛选
-    const minC = s.filterMinChars || 0;
-    const maxC = s.filterMaxChars || 0;
+    const minC = minChars || 0;
+    const maxC = maxChars || 0;
     if (minC > 0) {
         items = items.filter((x) => (x.content || "").length >= minC);
     }
@@ -1404,21 +1643,55 @@ function getFilteredSummaries() {
     return items;
 }
 
-// 根据设置里的 summaryOrder 对数组进行排序（返回新数组，不修改原数组）
-// "desc" = 倒序（数组末尾 = 最新的排在显示最前面）
-// "asc"  = 正序（数组开头 = 最旧的排在显示最前面）
-function getOrderedSummaries(arr) {
-    const s = getSettings();
-    if (s.summaryOrder === "asc") {
-        return arr.slice(); // 数组本身就是正序存储的（旧的在前），直接返回
+// 通用排序：desc = 倒序（数组末尾/最新排在显示最前面），asc = 正序（数组开头/最旧排在最前面）。
+// 数组本身按追加顺序存储（旧的在前），所以 asc 直接返回浅拷贝，desc 则整体反转。
+function orderEntries(arr, order) {
+    return order === "asc" ? arr.slice() : arr.slice().reverse();
+}
+
+// 更新排序切换按钮自身的图标和文字（长期记忆、核心记忆的排序按钮共用这一份逻辑）
+function updateOrderToggleButton(btnId, order) {
+    const btn = document.getElementById(btnId);
+    if (!btn) return;
+    const icon = btn.querySelector("i");
+    const span = btn.querySelector("span");
+    if (icon) {
+        icon.className = order === "desc" ? "fa-solid fa-arrow-down-wide-short" : "fa-solid fa-arrow-up-wide-short";
     }
-    return arr.slice().reverse(); // 倒序
+    if (span) {
+        span.textContent = order === "desc" ? "倒序(新→旧)" : "正序(旧→新)";
+    }
+}
+
+// 根据当前筛选设置，返回应该在面板里显示的 summaries 子集（不修改原数组）
+function getFilteredSummaries() {
+    const s = getSettings();
+    const data = getChatData();
+    return filterEntriesByTimeAndChars(data.summaries, s.filterTimeRange, s.filterMinChars, s.filterMaxChars);
+}
+
+// 根据设置里的 summaryOrder 对数组进行排序（返回新数组，不修改原数组）
+function getOrderedSummaries(arr) {
+    return orderEntries(arr, getSettings().summaryOrder);
+}
+
+// 核心记忆版本的筛选/排序，字段/逻辑与长期记忆完全对称，独立设置互不影响
+function getFilteredCores() {
+    const s = getSettings();
+    const data = getChatData();
+    return filterEntriesByTimeAndChars(data.coreMemories || [], s.coreFilterTimeRange, s.coreFilterMinChars, s.coreFilterMaxChars);
+}
+function getOrderedCores(arr) {
+    return orderEntries(arr, getSettings().coreOrder);
 }
 
 function populateWorldBookSelect() {
     const select = document.getElementById("mem-wi-book");
     if (!select) return;
-    const previousValue = select.value;
+    const s = getSettings();
+    // 优先保留当前下拉框已经选中的值（面板运行期间点"刷新"不应该丢失选择），
+    // 面板刚打开、下拉框还是空的情况下，才使用上次保存的 wiBookName 恢复选择。
+    const previousValue = select.value || s.wiBookName;
     select.innerHTML = "";
     const names = WI_API?.world_names || [];
     if (names.length === 0) {
@@ -1430,6 +1703,12 @@ function populateWorldBookSelect() {
     }
     if (names.includes(previousValue)) {
         select.value = previousValue;
+        // 用户上次选的书如果因为改名/被删而不在列表里了，wiBookName 会在这里静默保留旧值
+        // （不强行清空，万一书只是暂时没加载出来），只有真正选中一个存在的书时才更新保存值。
+        if (s.wiBookName !== previousValue) {
+            s.wiBookName = previousValue;
+            saveSettings();
+        }
     }
 }
 
@@ -1544,9 +1823,6 @@ function renderPanel() {
         }
     }
     lastAddedSummaryId = null;
-
-    //：绑定拖拽排序
-    bindDragSort(list);
 }
 
 function bindPanelEvents() {
@@ -1563,36 +1839,43 @@ function bindPanelEvents() {
         updateInjection();
     });
 
-    // 提取核心按钮
+    // 提取核心按钮：以 selectedForCoreIds 为准，而不是只读当前 DOM 里勾选的 checkbox——
+    // 因为筛选/分页变化后，之前勾选的条目可能暂时不在当前渲染的页面里（但仍然算"已勾选"），
+    // 只读 DOM 会漏掉这部分，导致用户"明明勾了却没被提取"。
     document.getElementById("mem-core-summarize-btn")?.addEventListener("click", async () => {
-        const checkboxes = document.querySelectorAll(".mem-select-for-core:checked");
-        const selectedIds = Array.from(checkboxes).map((cb) => cb.dataset.id);
+        const selectedIds = Array.from(selectedForCoreIds);
         await runCoreSummarization(selectedIds);
     });
 
     // 核心记忆列表事件委托
-    document.getElementById("mem-core-list")?.addEventListener("click", (e) => {
+    const coreList = document.getElementById("mem-core-list");
+    coreList?.addEventListener("click", (e) => {
         const target = e.target.closest("button");
         const id = target?.dataset?.id;
         if (!id) return;
-        const data = getChatData();
-        const cores = data.coreMemories || [];
-        const idx = cores.findIndex((x) => x.id === id);
-        if (idx === -1) return;
+        try {
+            const data = getChatData();
+            const cores = data.coreMemories || [];
+            const idx = cores.findIndex((x) => x.id === id);
+            if (idx === -1) return;
 
-        if (target.classList.contains("mem-core-copy")) {
-            copyToClipboard(cores[idx].content, "已复制该条核心记忆");
-        } else if (target.classList.contains("mem-core-delete")) {
-            if (!confirm("删除这条核心记忆？删除后不可恢复。")) return;
-            cores.splice(idx, 1);
-            saveChatData();
-            updateInjection();
-            renderPanel();
+            if (target.classList.contains("mem-core-copy")) {
+                copyToClipboard(cores[idx].content, "已复制该条核心记忆");
+            } else if (target.classList.contains("mem-core-delete")) {
+                if (!confirm("删除这条核心记忆？删除后不可恢复。")) return;
+                cores.splice(idx, 1);
+                saveChatData();
+                updateInjection();
+                renderCoreMemories();
+            }
+        } catch (err) {
+            console.error("[记忆总结助手] 处理核心记忆列表点击事件异常：", err);
+            toastError(`操作失败：${extractErrorReason(err)}`);
         }
     });
 
     // 核心记忆文本编辑保存
-    document.getElementById("mem-core-list")?.addEventListener("change", (e) => {
+    coreList?.addEventListener("change", (e) => {
         const target = e.target;
         if (!target.classList.contains("mem-core-text")) return;
         const id = target.dataset.id;
@@ -1603,6 +1886,78 @@ function bindPanelEvents() {
             entry.content = target.value;
             saveChatData();
             updateInjection();
+        }
+    });
+
+    // 核心记忆拖拽排序（同长期记忆一样，只绑一次，见 bindDragSort 顶部的说明）
+    bindDragSort(coreList, { dataKey: "coreMemories", orderSettingKey: "coreOrder" });
+
+    // 手动添加核心记忆
+    document.getElementById("mem-core-manual-add-btn")?.addEventListener("click", () => {
+        const textarea = document.getElementById("mem-core-manual-add-text");
+        if (!textarea) return;
+        const content = textarea.value.trim();
+        if (!content) {
+            toastInfo("请先输入要添加的核心记忆内容");
+            return;
+        }
+        const data = getChatData();
+        if (!data.coreMemories) data.coreMemories = [];
+        const entry = {
+            id: `manual-core-${Date.now()}`,
+            time: new Date().toLocaleString(),
+            timestamp: Date.now(),
+            content: content,
+            sourceIds: [], // 手动添加的没有来源摘要
+        };
+        data.coreMemories.push(entry);
+        lastAddedCoreId = entry.id;
+        saveChatData();
+        updateInjection();
+        textarea.value = "";
+        renderCoreMemories();
+        toastSuccess("已手动添加一条核心记忆");
+    });
+
+    // 核心记忆筛选：时间范围 / 最小字数 / 最大字数
+    document.getElementById("mem-core-filter-time")?.addEventListener("change", (e) => {
+        s.coreFilterTimeRange = e.target.value;
+        saveSettings();
+        coreShowAll = false;
+        renderCoreMemories();
+    });
+    document.getElementById("mem-core-filter-min")?.addEventListener("change", (e) => {
+        s.coreFilterMinChars = Math.max(0, parseInt(e.target.value) || 0);
+        saveSettings();
+        coreShowAll = false;
+        renderCoreMemories();
+    });
+    document.getElementById("mem-core-filter-max")?.addEventListener("change", (e) => {
+        s.coreFilterMaxChars = Math.max(0, parseInt(e.target.value) || 0);
+        saveSettings();
+        coreShowAll = false;
+        renderCoreMemories();
+    });
+
+    // 核心记忆排序切换按钮
+    document.getElementById("mem-core-order-toggle")?.addEventListener("click", () => {
+        s.coreOrder = s.coreOrder === "desc" ? "asc" : "desc";
+        saveSettings();
+        updateInjection();
+        renderCoreMemories();
+        updateOrderToggleButton("mem-core-order-toggle", s.coreOrder);
+    });
+
+    // 核心记忆分页按钮事件委托
+    document.getElementById("mem-core-pagination")?.addEventListener("click", (e) => {
+        const target = e.target.closest("button");
+        if (!target) return;
+        if (target.id === "mem-core-show-all") {
+            coreShowAll = true;
+            renderCoreMemories();
+        } else if (target.id === "mem-core-show-less") {
+            coreShowAll = false;
+            renderCoreMemories();
         }
     });
 
@@ -1653,14 +2008,16 @@ function bindPanelEvents() {
         s.autoInject = e.target.checked;
         saveSettings();
         updateInjection();
+        updateWiWriteAvailability(); // 开关"自动注入"会直接影响"写入世界书"按钮是否可用
     });
     document.getElementById("mem-inject-pos")?.addEventListener("change", (e) => {
         s.injectPosition = e.target.value;
         saveSettings();
+        toggleInjectPositionSubrow();
         updateInjection();
     });
-    document.getElementById("mem-inject-depth").addEventListener("change", (e) => {
-        s.injectDepth = parseInt(e.target.value) || 0;
+    document.getElementById("mem-inject-depth")?.addEventListener("change", (e) => {
+        s.injectDepth = Math.max(0, parseInt(e.target.value) || 0);
         saveSettings();
         updateInjection();
     });
@@ -1674,7 +2031,21 @@ function bindPanelEvents() {
         saveSettings();
         updateInjection();
     });
+    document.getElementById("mem-inject-template-summary")?.addEventListener("change", (e) => {
+        s.injectTemplateSummary = e.target.value;
+        saveSettings();
+        updateInjection();
+    });
+    document.getElementById("mem-inject-template-core")?.addEventListener("change", (e) => {
+        s.injectTemplateCore = e.target.value;
+        saveSettings();
+        updateInjection();
+    });
 
+    document.getElementById("mem-wi-book")?.addEventListener("change", (e) => {
+        s.wiBookName = e.target.value;
+        saveSettings();
+    });
     document.getElementById("mem-wi-position")?.addEventListener("change", (e) => {
         s.wiPosition = e.target.value;
         saveSettings();
@@ -1687,6 +2058,12 @@ function bindPanelEvents() {
     document.getElementById("mem-wi-role")?.addEventListener("change", (e) => {
         s.wiRole = e.target.value;
         saveSettings();
+    });
+    document.getElementById("mem-wi-write-summary")?.addEventListener("click", async (e) => {
+        await writeMergedMemoryToWorldInfo("summary", e.currentTarget);
+    });
+    document.getElementById("mem-wi-write-core")?.addEventListener("click", async (e) => {
+        await writeMergedMemoryToWorldInfo("core", e.currentTarget);
     });
 
     document.getElementById("mem-copy-all")?.addEventListener("click", () => {
@@ -1718,6 +2095,7 @@ function bindPanelEvents() {
         });
         if (!confirmed) return;
         data.summaries = [];
+        selectedForCoreIds.clear();
         saveChatData();
         updateInjection();
         renderPanel();
@@ -1811,6 +2189,7 @@ function bindPanelEvents() {
         const entry = {
             id: `manual-${Date.now()}`,
             time: new Date().toLocaleString(),
+            timestamp: Date.now(),
             range: [0, 0], // 手动添加的没有消息范围
             content: content,
             auto: false,
@@ -1855,25 +2234,14 @@ function bindPanelEvents() {
         saveSettings();
         updateInjection(); // 排序也影响注入
         renderPanel();
-        // 更新按钮自身的显示
-        const btn = document.getElementById("mem-order-toggle");
-        if (btn) {
-            const icon = btn.querySelector("i");
-            const span = btn.querySelector("span");
-            if (icon) {
-                icon.className = s.summaryOrder === "desc"
-                    ? "fa-solid fa-arrow-down-wide-short"
-                    : "fa-solid fa-arrow-up-wide-short";
-            }
-            if (span) {
-                span.textContent = s.summaryOrder === "desc" ? "倒序(新→旧)" : "正序(旧→新)";
-            }
-        }
+        updateOrderToggleButton("mem-order-toggle", s.summaryOrder);
     });
 
     populateWorldBookSelect();
     populateWiPositionSelect();
     toggleWiAtDepthRow();
+    toggleInjectPositionSubrow();
+    updateWiWriteAvailability();
 
     // 事件委托：总结列表里的按钮（列表会被重新渲染，所以在父容器上监听）
     const list = document.getElementById("mem-summary-list");
@@ -1882,50 +2250,81 @@ function bindPanelEvents() {
         const target = e.target.closest("button");
         const id = target?.dataset?.id;
         if (!id) return;
-        const data = getChatData();
-        const entryIndex = data.summaries.findIndex((x) => x.id === id);
-        if (entryIndex === -1) return;
+        try {
+            const data = getChatData();
+            const entryIndex = data.summaries.findIndex((x) => x.id === id);
+            if (entryIndex === -1) return;
 
-        if (target.classList.contains("mem-copy-one")) {
-            copyToClipboard(data.summaries[entryIndex].content, "已复制该条总结");
-        } else if (target.classList.contains("mem-delete-one")) {
-            // 删除只移除这条摘要文本，不会让对应的消息重新变回"待总结"状态
-            // （lastSummarizedIndex 不受影响），避免同一段对话被重复总结、重复消耗 Token。
-            if (!confirm('删除这条总结？删除后不可恢复，对应的消息也不会重新变为"待总结"状态。')) return;
-            data.summaries.splice(entryIndex, 1);
-            saveChatData();
-            updateInjection();
-            renderPanel();
-        } else if (target.classList.contains("mem-write-wi")) {
-            await openWiWritePreview(data.summaries[entryIndex], target);
+            if (target.classList.contains("mem-copy-one")) {
+                copyToClipboard(data.summaries[entryIndex].content, "已复制该条总结");
+            } else if (target.classList.contains("mem-delete-one")) {
+                // 删除只移除这条摘要文本，不会让对应的消息重新变回"待总结"状态
+                // （lastSummarizedIndex 不受影响），避免同一段对话被重复总结、重复消耗 Token。
+                if (!confirm('删除这条总结？删除后不可恢复，对应的消息也不会重新变为"待总结"状态。')) return;
+                data.summaries.splice(entryIndex, 1);
+                selectedForCoreIds.delete(id);
+                saveChatData();
+                updateInjection();
+                renderPanel();
+            }
+        } catch (err) {
+            // 委托点击回调本身是 async 函数，抛出的异常会变成"未处理的 Promise 拒绝"而不是
+            // 正常冒泡，必须自己兜底捕获，否则这次操作会在用户毫无感知的情况下静默失败。
+            console.error("[记忆总结助手] 处理长期记忆列表点击事件异常：", err);
+            toastError(`操作失败：${extractErrorReason(err)}`);
         }
     });
 
     list.addEventListener("change", (e) => {
         const target = e.target;
-        if (!target.classList.contains("mem-summary-text")) return;
-        const id = target.dataset.id;
-        const data = getChatData();
-        const entry = data.summaries.find((x) => x.id === id);
-        if (entry) {
-            entry.content = target.value;
-            saveChatData();
-            updateInjection();
+        const id = target?.dataset?.id;
+        if (!id) return;
+        if (target.classList.contains("mem-summary-text")) {
+            const data = getChatData();
+            const entry = data.summaries.find((x) => x.id === id);
+            if (entry) {
+                entry.content = target.value;
+                saveChatData();
+                updateInjection();
+            }
+        } else if (target.classList.contains("mem-select-for-core")) {
+            // 记住勾选状态，避免筛选/排序/分页变化重渲染整个列表后勾选丢失
+            if (target.checked) {
+                selectedForCoreIds.add(id);
+            } else {
+                selectedForCoreIds.delete(id);
+            }
         }
     });
+
+    // 拖拽排序只需要绑定一次：listEl 容器本身在整个面板生命周期内不会被替换
+    // （renderPanel 只替换它的 innerHTML），如果放在 renderPanel() 里每次重渲染都重新绑定，
+    // touchstart/mousedown 等监听会不断叠加且永远不会被清理，长时间使用后拖拽会越来越卡、
+    // 甚至一次触摸触发多次 startDrag。绑定一次，内部逻辑通过实时查询 DOM 适配每次新内容。
+    bindDragSort(list, { dataKey: "summaries", orderSettingKey: "summaryOrder" });
 }
 
 // ===================== 拖拽排序 =====================
 // 在触摸屏上通过长按触发拖拽，桌面端通过 mousedown 长按触发。
 // 拖拽期间移动到哪个条目上方就把被拖动的条目插到它前面，松手后保存到 chatMetadata。
-// 只对 mem-summary-list 里的 .mem-summary-item 生效，核心记忆列表不受影响。
-
-function bindDragSort(listEl) {
+// 长期记忆列表、核心记忆列表都用这一份实现，靠 options 区分各自要操作的数据数组和排序设置。
+//
+// 重要：这个函数只应该在面板初始化时对每个列表容器调用一次（见 bindPanelEvents），
+// 不能放进 renderPanel()/renderCoreMemories() 里每次重渲染都调用一次——虽然内部有
+// _memDragCleanup 兜底清理，但如果外部反复调用，touchstart/mousedown 等监听会先加后清，
+// 频繁增删本身也是不必要的开销；真正的设计意图是"绑一次、内部实时查询 DOM 适配新内容"。
+function bindDragSort(listEl, options) {
     if (!listEl) return;
-    // 防止重复绑定：如果已经绑过，先清理旧的 document 级监听
+    const dataKey = options?.dataKey === "coreMemories" ? "coreMemories" : "summaries";
+    const orderSettingKey = options?.orderSettingKey === "coreOrder" ? "coreOrder" : "summaryOrder";
+
+    // 防止重复绑定：如果这个元素之前已经绑过（正常流程下不会发生，双重保险），
+    // 先把上一次绑的全部监听（包括元素自身的 touchstart/mousedown 等）彻底清理掉，
+    // 否则重复调用会导致同一个手势触发多次 startDrag，长期使用后越来越卡。
     if (listEl._memDragCleanup) {
         listEl._memDragCleanup();
     }
+
     let longPressTimer = null;
     let isDragging = false;
     let dragEl = null;
@@ -2009,7 +2408,7 @@ function bindDragSort(listEl) {
         dragEl.style.zIndex = "";
         dragEl.style.pointerEvents = "";
 
-        // 读取当前 DOM 顺序，更新 data.summaries 的顺序
+        // 读取当前 DOM 顺序，更新对应数据数组（summaries 或 coreMemories）的顺序
         const newOrderIds = Array.from(listEl.querySelectorAll(".mem-summary-item"))
             .map((el) => el.dataset.id)
             .filter(Boolean);
@@ -2017,21 +2416,22 @@ function bindDragSort(listEl) {
         if (newOrderIds.length > 0) {
             const data = getChatData();
             const s = getSettings();
-            const idToEntry = new Map(data.summaries.map((x) => [x.id, x]));
+            const list = data[dataKey] || [];
+            const idToEntry = new Map(list.map((x) => [x.id, x]));
 
             // 如果当前显示的是倒序，DOM 顺序和存储顺序是相反的：
             // DOM 第一个 = 最新的 = 存储数组的最后一个。
             // 所以倒序时要把 DOM 顺序 reverse 回来再存。
-            const displayIds = s.summaryOrder === "desc"
+            const displayIds = s[orderSettingKey] === "desc"
                 ? newOrderIds.slice().reverse()
                 : newOrderIds;
 
-            // 重建 summaries 数组：先按 displayIds 排，剩余不在当前筛选结果里的条目
+            // 重建数组：先按 displayIds 排，剩余不在当前筛选结果里的条目
             // 保持原来的相对位置追加在后面（筛选隐藏的条目不能丢）
             const reorderedSet = new Set(displayIds);
             const reordered = displayIds.map((id) => idToEntry.get(id)).filter(Boolean);
-            const remaining = data.summaries.filter((x) => !reorderedSet.has(x.id));
-            data.summaries = reordered.concat(remaining);
+            const remaining = list.filter((x) => !reorderedSet.has(x.id));
+            data[dataKey] = reordered.concat(remaining);
 
             saveChatData();
             updateInjection();
@@ -2092,8 +2492,18 @@ function bindDragSort(listEl) {
     document.addEventListener("mousemove", onPointerMove);
     document.addEventListener("mouseup", onPointerUp);
 
-    // 记录清理函数，下次 bindDragSort 调用时先清理，防止重复绑定
+    // 记录清理函数：下次（理论上）重复调用 bindDragSort 时先清理，防止重复绑定。
+    // 之前的版本这里只清理了 document 级的 mousemove/mouseup，遗漏了 listEl 自身的
+    // touchstart/touchmove/touchend/touchcancel/mousedown——而 listEl 这个容器节点
+    // 在整个面板生命周期内是同一个 DOM 元素（renderPanel 只替换它的 innerHTML），
+    // 如果这个函数曾经被每次渲染都调用（本插件之前的版本确实如此），这些监听会只增不减，
+    // 用得越久越卡，是长期运行稳定性的一个真实隐患，这里一并修掉。
     listEl._memDragCleanup = () => {
+        listEl.removeEventListener("touchstart", onPointerDown);
+        listEl.removeEventListener("touchmove", onPointerMove);
+        listEl.removeEventListener("touchend", onPointerUp);
+        listEl.removeEventListener("touchcancel", onPointerUp);
+        listEl.removeEventListener("mousedown", onPointerDown);
         document.removeEventListener("mousemove", onPointerMove);
         document.removeEventListener("mouseup", onPointerUp);
     };
@@ -2123,6 +2533,10 @@ if (window.__memSummarizerLoaded) {
             try {
                 manualReminderCount = 0;
                 summaryShowAll = false;
+                coreShowAll = false;
+                // 切换聊天后，之前勾选的"待提取核心"条目属于上一个聊天，直接清空，
+                // 避免误把这次聊天里同名 id（理论上不会重复，但清空更保险）的条目带入提取。
+                selectedForCoreIds.clear();
                 renderPanel();
                 updateInjection();
             } catch (e) {
