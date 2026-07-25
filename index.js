@@ -90,6 +90,13 @@ const defaultSettings = {
     coreInjectCount: 5,               // 自动注入时合并最近几条核心记忆
     summaryPageSize: 20,              // 长期记忆列表每页/默认显示条数
 
+    // 生成总结/提取核心时，覆盖这一次生成的最大回复长度上限（0=不覆盖，沿用当前连接配置本身的设置）。
+    // 主要是为了兼容推理/思考模型（o1/o3、DeepSeek-R1、Gemini Thinking 等）——它们的内部推理
+    // 本身会占用回复长度预算，如果预算是照日常聊天短回复设的，总结这种需要"消化一大段上下文"
+    // 的请求就可能把预算全耗在思考上，正文一个字都吐不出来，看起来像是"AI返回空内容"。
+    // 酒馆官方文档也建议推理模型用 1024-4096，这里默认给 2048 留足余量。
+    quietResponseLength: 2048,
+
     // 面板"高级"折叠分组的展开/收起状态（仅影响 UI 显示，不影响任何数据）。
     // 默认全部收起，手机端打开面板时只看到"基础模式"的 4 项常用控件。
     sectionOpenSummary: false,        // ▼ 总结设置
@@ -329,17 +336,44 @@ function applyTemplate(template, content, placeholder = "{{content}}") {
 // 这里优先按新版对象参数调用；如果这次调用本身直接抛错（比较可能发生在
 // 更旧版本的酒馆上，把对象当成字符串位置参数处理导致类型错误），
 // 就退回旧版的位置参数写法再试一次，尽量兼容新旧两种酒馆版本。
-async function callGenerateQuietPrompt(context, promptText) {
+async function callGenerateQuietPrompt(context, promptText, responseLength) {
+    const promptPreview = promptText.length > 200
+        ? `${promptText.slice(0, 100)}...(共${promptText.length}字)...${promptText.slice(-100)}`
+        : promptText;
+    console.log(`[记忆总结助手] 即将调用 generateQuietPrompt，提示词长度=${promptText.length}，responseLength=${responseLength || "(未覆盖，使用当前连接配置的默认值)"}`);
+    console.log(`[记忆总结助手] 提示词预览：${promptPreview}`);
+
+    const args = {
+        quietPrompt: promptText,
+        quietToLoud: false,
+        skipWIAN: false,
+    };
+    // 只有配置了大于 0 的值才覆盖响应长度上限，0 表示沿用当前连接配置本身的设置。
+    // 之所以需要这个：推理/思考模型（o1、o3、DeepSeek-R1、Gemini Thinking 等）的内部推理过程
+    // 本身会消耗回复长度预算，官方文档明确提到"回复为空"是这种情况的典型症状，
+    // 推荐把长度设到 1024-4096；而日常聊天回复通常很短，用户很可能从没把这个值调高过，
+    // 于是聊天正常、但总结这种需要"分析一大段上下文"的请求就可能把预算全耗在思考上，
+    // 正文一个字都吐不出来——现象和这次遇到的完全一致。
+    if (Number.isFinite(responseLength) && responseLength > 0) {
+        args.responseLength = responseLength;
+    }
+
+    let result;
     try {
-        return await context.generateQuietPrompt({
-            quietPrompt: promptText,
-            quietToLoud: false,
-            skipWIAN: false,
-        });
+        result = await context.generateQuietPrompt(args);
     } catch (e) {
         console.warn("[记忆总结助手] generateQuietPrompt 新版（对象参数）调用方式失败，尝试兼容旧版本酒馆的位置参数写法：", e);
-        return await context.generateQuietPrompt(promptText, false, false);
+        result = await context.generateQuietPrompt(promptText, false, false);
     }
+
+    console.log(`[记忆总结助手] generateQuietPrompt 返回：类型=${typeof result}，长度=${result ? String(result).length : 0}`);
+    if (!String(result || "").trim()) {
+        console.warn("[记忆总结助手] generateQuietPrompt 返回了空内容。如果你在读这条日志排查问题：" +
+            "1) 确认当前连接的模型不是推理/思考模型在小的回复长度限制下把预算耗尽（可以在“AI回复配置”里临时调大最大回复长度再试一次）；" +
+            "2) 确认没有内容过滤/审查拦截了这次生成（换一段不敏感的聊天内容测试一次总结看看是否正常）；" +
+            "3) 把这几行日志连同你的酒馆版本、API/模型一起反馈，方便定位。");
+    }
+    return result;
 }
 
 function formatMessagesForPrompt(messages) {
@@ -580,7 +614,7 @@ async function runSummarization(manual = false) {
         }
 
         const prompt = buildFinalPrompt(content);
-        const result = await callGenerateQuietPrompt(context, prompt);
+        const result = await callGenerateQuietPrompt(context, prompt, settings.quietResponseLength);
 
         const freshContext = getContext();
         if (freshContext.chatId !== chatIdSnapshot) {
@@ -590,7 +624,7 @@ async function runSummarization(manual = false) {
 
         const trimmed = String(result || "").trim();
         if (!trimmed) {
-            throw new Error("AI 返回了空内容，可能是接口异常、超时或内容被过滤");
+            throw new Error("AI 返回了空内容，可能是接口异常、超时、内容被过滤，或推理模型把回复长度预算耗在了思考上（可以在“总结设置”里调大“最大回复长度”试试）；按 F12 打开控制台能看到更详细的诊断日志");
         }
 
         const entry = {
@@ -747,7 +781,7 @@ async function runCoreSummarization(selectedIds) {
         }
 
         const prompt = applyTemplate(settings.corePromptTemplate, combinedContent);
-        const result = await callGenerateQuietPrompt(context, prompt);
+        const result = await callGenerateQuietPrompt(context, prompt, settings.quietResponseLength);
 
         const freshContext = getContext();
         if (freshContext.chatId !== chatIdSnapshot) {
@@ -757,7 +791,7 @@ async function runCoreSummarization(selectedIds) {
 
         const trimmed = String(result || "").trim();
         if (!trimmed) {
-            throw new Error("AI 返回了空内容");
+            throw new Error("AI 返回了空内容，同上，可以查看控制台日志或调大“总结设置”里的最大回复长度");
         }
 
         // 生成核心记忆条目
@@ -837,8 +871,8 @@ async function runCoreSummarization(selectedIds) {
 
 // ------------------------ 写入世界书 ------------------------
 
-// 位置枚举键名 -> 中文说明。键名以当前酒馆版本实际导出的 world_info_position
-// 对象为准动态探测，这里的表只是用来把常见键名翻译成好读的中文；
+// 位置枚举键名 -> 中文说明。键名以当前酒馆版本实际导出的位置枚举对象（见下面
+// getWiPositionObj）为准动态探测，这里的表只是用来把常见键名翻译成好读的中文；
 // 探测到了但表里没有的键名会直接显示原始键名，不会因为翻译表没覆盖到就出错。
 const WI_POSITION_LABELS = {
     before: "角色定义之前（Before Char）",
@@ -851,13 +885,22 @@ const WI_POSITION_LABELS = {
     outlet: "输出插槽（Outlet）",
 };
 
+// 世界书"插入位置"这个枚举对象在 world-info.js 里的导出名，酒馆较新版本（World Info
+// 位置系统重构后）改成了 wi_anchor_position；旧版本用的是 world_info_position。
+// 两个名字都试一遍，取到哪个算哪个——找不到就返回 null，上层会优雅降级成
+// "不支持选择位置，使用世界书默认位置"，不会因为取不到值就报错或者写坏数据。
+function getWiPositionObj() {
+    if (!WI_API) return null;
+    return WI_API.wi_anchor_position || WI_API.world_info_position || null;
+}
+
 function populateWiPositionSelect() {
     const select = document.getElementById("mem-wi-position");
     if (!select) return;
     const s = getSettings();
     select.innerHTML = "";
 
-    const posObj = WI_API?.world_info_position;
+    const posObj = getWiPositionObj();
     if (!posObj || typeof posObj !== "object" || Object.keys(posObj).length === 0) {
         select.appendChild(el(`<option value="">（当前酒馆版本不支持选择写入位置，将使用世界书默认位置）</option>`));
         select.disabled = true;
@@ -924,7 +967,7 @@ async function writeToWorldInfo(bookName, content, keysStr, positionKey, depth, 
 
         // 只有当前版本真的支持这个位置键名时才去设置，找不到就保持世界书自己的默认值，
         // 绝不往条目里塞一个凭空猜的数值把条目写坏。
-        const posObj = WI_API.world_info_position;
+        const posObj = getWiPositionObj();
         if (posObj && positionKey && posObj[positionKey] !== undefined) {
             entry.position = posObj[positionKey];
             if (positionKey === "atDepth") {
@@ -1004,7 +1047,7 @@ async function writeMergedMemoryToWorldInfo(kind, triggerBtn) {
         .map((x) => x.trim())
         .filter(Boolean);
 
-    const posObj = WI_API?.world_info_position;
+    const posObj = getWiPositionObj();
     const positionLabel =
         posObj && s.wiPosition && posObj[s.wiPosition] !== undefined
             ? (WI_POSITION_LABELS[s.wiPosition] || s.wiPosition)
@@ -1299,6 +1342,7 @@ function syncSettingsToForm() {
     setVal("mem-style-ref-n", s.styleReferenceCount);
     setVal("mem-summary-warn-threshold", s.summaryWarnThreshold);
     setVal("mem-core-warn-threshold", s.coreWarnThreshold);
+    setVal("mem-quiet-response-length", s.quietResponseLength);
     setChecked("mem-inject", s.autoInject);
     setVal("mem-inject-pos", s.injectPosition);
     setVal("mem-inject-depth", s.injectDepth);
@@ -1387,6 +1431,13 @@ function buildPanelHtml() {
         </div>
         <div class="mem-hint">
             条数达到阈值后会在面板里显示提醒（不会自动删除任何东西），提示你该整理一下了；设为 0 可以关闭对应的提醒。
+        </div>
+        <div class="mem-row mem-inline">
+            <label>生成总结/提取核心时的最大回复长度：<input type="number" id="mem-quiet-response-length" min="0" value="${s.quietResponseLength}" style="width:70px" placeholder="0=不覆盖"/></label>
+        </div>
+        <div class="mem-hint">
+            如果用的是推理/思考模型（如 DeepSeek-R1、Gemini Thinking、o1/o3 等），它们生成回复前的内部思考本身要占用这个长度预算，
+            预算太小会出现"总结生成了，内容却是空的"——遇到这种情况可以把这个值调大（比如 4096）；填 0 则不覆盖，使用当前连接配置自己的回复长度设置。
         </div>
         <div class="mem-row mem-status" id="mem-status"></div>`;
 
@@ -2314,6 +2365,10 @@ function bindPanelEvents() {
         s.coreWarnThreshold = Math.max(0, parseInt(e.target.value) || 0);
         saveSettings();
         updateStatusLine();
+    });
+    document.getElementById("mem-quiet-response-length")?.addEventListener("change", (e) => {
+        s.quietResponseLength = Math.max(0, parseInt(e.target.value) || 0);
+        saveSettings();
     });
 
     document.getElementById("mem-run-now")?.addEventListener("click", async () => {
