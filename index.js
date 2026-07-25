@@ -314,6 +314,34 @@ function applyTemplate(template, content, placeholder = "{{content}}") {
     return t.trim() ? `${t}\n\n${content}` : content;
 }
 
+// 统一封装 generateQuietPrompt 的调用方式。
+//
+// 酒馆这个接口在较新版本里改成了"对象参数"写法：
+//   generateQuietPrompt({ quietPrompt, quietToLoud, skipWIAN })
+// 旧版本则是"位置参数"写法：
+//   generateQuietPrompt(quietPrompt, quietToLoud, skipWIAN)
+// 这两种写法互不兼容——如果按旧的位置参数写法，在新版酒馆上传一个纯字符串进去，
+// 新版函数会尝试从这个字符串上解构出 quietPrompt 属性，字符串没有这个属性，
+// 解构结果是 undefined，于是实际发给 AI 的"要总结的内容"直接丢失，
+// 但函数本身并不会报错——AI 只会收到一个空提示词，往往就安静地返回空内容，
+// 或者干脆顺着聊天内容随便续写几句，非常隐蔽，很容易被误判成"接口坏了"或"AI抽风"。
+//
+// 这里优先按新版对象参数调用；如果这次调用本身直接抛错（比较可能发生在
+// 更旧版本的酒馆上，把对象当成字符串位置参数处理导致类型错误），
+// 就退回旧版的位置参数写法再试一次，尽量兼容新旧两种酒馆版本。
+async function callGenerateQuietPrompt(context, promptText) {
+    try {
+        return await context.generateQuietPrompt({
+            quietPrompt: promptText,
+            quietToLoud: false,
+            skipWIAN: false,
+        });
+    } catch (e) {
+        console.warn("[记忆总结助手] generateQuietPrompt 新版（对象参数）调用方式失败，尝试兼容旧版本酒馆的位置参数写法：", e);
+        return await context.generateQuietPrompt(promptText, false, false);
+    }
+}
+
 function formatMessagesForPrompt(messages) {
     return messages
         .filter((m) => !m.is_system && stripHtml(m.mes))
@@ -552,7 +580,7 @@ async function runSummarization(manual = false) {
         }
 
         const prompt = buildFinalPrompt(content);
-        const result = await context.generateQuietPrompt(prompt, false, false);
+        const result = await callGenerateQuietPrompt(context, prompt);
 
         const freshContext = getContext();
         if (freshContext.chatId !== chatIdSnapshot) {
@@ -719,7 +747,7 @@ async function runCoreSummarization(selectedIds) {
         }
 
         const prompt = applyTemplate(settings.corePromptTemplate, combinedContent);
-        const result = await context.generateQuietPrompt(prompt, false, false);
+        const result = await callGenerateQuietPrompt(context, prompt);
 
         const freshContext = getContext();
         if (freshContext.chatId !== chatIdSnapshot) {
